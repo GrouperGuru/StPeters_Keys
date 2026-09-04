@@ -1,0 +1,1266 @@
+/* =============================================================================
+ * paper.css — St. Peter's Keys :: THE NEWSLETTER ITSELF (screen + print)
+ *
+ * Loaded UNCONDITIONALLY (no media attribute): this file is the paper's
+ * appearance, so screen and print must agree pixel-for-inch. Export-only
+ * overrides live in print.css (media="print").
+ *
+ * Scope contract (SPEC §8, docs/CLASSES.md):
+ *   OWNS   : #page-stage (only the 3D/positioning bits flip.js depends on),
+ *            .paper, .paper-flow, .paper-shade, .fit, .fit-inner,
+ *            .nl-*, .slip-*, .cal-*, .rt-out, .is-overflowing.
+ *   NEVER  : app chrome — #toolbar, #editor-pane, #rail-resizer, #thumb-rail,
+ *            #toasts, .tb-*, .ed-*, .rt (editor fields), .thumb, .toast,
+ *            #preview-pane, #stage-viewport, #stage-sizer.
+ *            There is not one selector for those in this file.
+ *
+ * No @import. No web fonts. No url(). No network requests of any kind — the
+ * app must work over file:// (SPEC §0). Every typeface is a system stack.
+ *
+ * GEOMETRY IS PHYSICAL. Paper boxes are expressed in `in` and type in `pt`
+ * (or in `em` of a `pt` base) so 1 screen inch == 1 printed inch.
+ *
+ * ---------------------------------------------------------------------------
+ * READ THIS BEFORE "CLEANING UP" ANYTHING
+ *
+ * Rules tagged "FIT ENGINE" or "FLIP ENGINE" in their comment are load-bearing.
+ * fit.js and flip.js measure the DOM; deleting one of those declarations does
+ * not change how the page looks — it silently switches the overflow guard off
+ * and content gets clipped by `.paper { overflow: hidden }`.
+ *
+ *   fit.js tier 1  shrinks `.fit-inner`'s font-size until it fits inside its
+ *                  `[data-fit]` box. It compares `fit-inner.scrollHeight`
+ *                  against `box.clientHeight`, so a box with an AUTO height
+ *                  always "fits" and the pass is a permanent no-op. Every
+ *                  tier-1 box therefore needs a DEFINITE height here:
+ *                  `.nl-box-body` (explicit `height`) and `.cal-cell`
+ *                  (definite via `.cal-week { flex:1 1 0 }` grid rows).
+ *   fit.js tier 2  scales `.paper-flow`'s base font-size. That only cascades
+ *                  if descendant type is expressed in `em`, NOT in absolute
+ *                  pt/px. Hence: ONE absolute size on `.paper-flow`, and
+ *                  everything below it in `em`.
+ * ---------------------------------------------------------------------------
+ *
+ * TABLE OF CONTENTS
+ *   01  Shell — #page-stage, .paper, .paper-shade, .paper-flow, .fit
+ *   02  Paper typography base + rich-text primitives
+ *   03  Pages 1 & 2 — .nl-*
+ *   04  Page 3 — .slip-*
+ *   05  Page 4 — .cal-*
+ *   06  Screen-only affordances (neutralised by print.css)
+ * ========================================================================== */
+
+
+/* =============================================================================
+ * 01 — SHELL
+ * -----------------------------------------------------------------------------
+ * flip.js MEASURES .paper's declared inch sizes and writes inline
+ * transform / visibility / z-index / box-shadow on it. Nothing here may
+ * conflict with that; print.css re-asserts with !important.
+ * ========================================================================== */
+
+/* FLIP ENGINE — the book's 3D context. `perspective` + `preserve-3d` are what
+ * make the rotateY page turn read as a physical leaf (SPEC §5). app.css also
+ * declares perspective and owns `transform-origin: top left`; do not add a
+ * transform-origin here or the zoom maths breaks. */
+#page-stage {
+  position: relative;
+  perspective: 2200px;
+  -webkit-perspective: 2200px;
+  transform-style: preserve-3d;
+}
+
+/* FLIP ENGINE — all four sheets are stacked absolutely at the same origin and
+ * hidden with `visibility`, never `display:none` (fit.js must be able to
+ * measure inactive pages — SPEC §4). */
+.paper {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: left center;
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+
+  overflow: hidden;              /* the trim edge — nothing may escape it */
+  background: #fff;
+  color: #000;
+
+  /* Screen affordance: the sheet reads as a physical plate on the canvas.
+   * flip.js overwrites this inline during a turn; print.css kills it. */
+  box-shadow: var(--sh-paper-plate, 0 18px 48px rgba(0, 0, 0, 0.45));
+
+  /* Rules, hairlines and the calendar logo must survive "background graphics
+   * off" in the browser print dialog. */
+  print-color-adjust: exact;
+  -webkit-print-color-adjust: exact;
+}
+
+/* Hard requirement 2 — border-box for EVERYTHING inside the sheet, so the
+ * inch-based paddings and the fixed box heights mean what they say. */
+.paper,
+.paper *,
+.paper *::before,
+.paper *::after {
+  box-sizing: border-box;
+}
+
+/* FLIP ENGINE — the exact trim sizes flip.js reads back to size the stage.
+ * Keep them declared in inches on `.paper` itself. */
+.paper[data-orientation="portrait"]  { width: 8.5in; height: 11in;  }
+.paper[data-orientation="landscape"] { width: 11in;  height: 8.5in; }
+
+/* FLIP ENGINE — NEVER `display:none`. See SPEC §4. */
+.paper.is-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* FLIP ENGINE — the shading gradient whose opacity flip.js ramps mid-turn. */
+.paper-shade {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 5;
+  background: linear-gradient(to right,
+    rgba(0, 0, 0, 0.40) 0%,
+    rgba(0, 0, 0, 0.10) 28%,
+    rgba(255, 255, 255, 0.18) 64%,
+    rgba(0, 0, 0, 0.06) 100%);
+}
+
+/* -----------------------------------------------------------------------------
+ * .paper-flow — the padded content box. Page margins live HERE, not on .paper.
+ *
+ * FIT ENGINE (tier 2): fit.js reads this element's CSS-default font-size once
+ * (caching it in [data-fit-natural]) and then writes a scaled px value inline.
+ * Two consequences:
+ *   1. this is the ONE place an absolute type size is allowed — everything
+ *      below it is sized in `em` so the scale cascades;
+ *   2. overflow must be `hidden`, never `auto`/`scroll`. A scroll container
+ *      would (a) steal layout width for a scrollbar and (b) make the flow look
+ *      like it always fits, blinding the page-level guard.
+ * `height:100%` gives page 4's `.cal-sheet { height:100% }` something definite
+ * to resolve against — without it every calendar row measures auto.
+ * -------------------------------------------------------------------------- */
+.paper-flow {
+  height: 100%;
+  padding: 0.5in;
+  overflow: hidden;
+  font-size: 10.5pt;             /* tier-2 base — see note above */
+  line-height: 1.06;
+}
+
+/* Page 4 runs closer to the trim than pages 1–3 (docs/CLASSES.md). Measured
+ * off docs/pg-4.png: grid rules land 0.47in from each side edge and 0.35in
+ * above the bottom trim. */
+.paper[data-page="4"] .paper-flow {
+  padding: 0.2in 0.47in 0.35in;
+}
+
+/* FIT ENGINE (tier 1) — `.fit` is the clipped box, `.fit-inner` is the single
+ * element child whose font-size fit.js drives. `.fit-inner` must stay a plain
+ * block with no margins of its own: a collapsing margin would desynchronise
+ * scrollHeight from what is visible. */
+.fit {
+  overflow: hidden;
+  min-width: 0;
+  min-height: 0;
+}
+
+.fit-inner {
+  display: block;
+  margin: 0;
+  min-width: 0;
+}
+
+/* Bound preview regions. `min-width:0` + break-word keep a long unbroken URL
+ * or a pasted 80-character word from blowing out its grid/flex track. */
+.rt-out {
+  min-width: 0;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+
+
+/* =============================================================================
+ * 02 — PAPER TYPOGRAPHY BASE + RICH-TEXT PRIMITIVES
+ * -----------------------------------------------------------------------------
+ * The editor writes raw HTML into [data-bind] regions (<p>, <ul>, <b>, <u>,
+ * <i>, <br>, <span>, <table>, .indent). Those tags need sane paper defaults
+ * here because app.css is forbidden from reaching inside .paper.
+ * ========================================================================== */
+
+.paper {
+  /* Local font stacks. Declared on .paper (not :root) so the chrome tokens in
+   * app.css are untouched. Every entry is a system or metric-compatible face —
+   * no webfonts, no downloads. */
+  --pf-serif:   'Times New Roman', 'Liberation Serif', 'Nimbus Roman No9 L',
+                'DejaVu Serif', Times, serif;
+  --pf-sans:    Verdana, Geneva, 'DejaVu Sans', 'Liberation Sans',
+                Tahoma, sans-serif;
+  --pf-display: 'Arial Black', 'Arial Bold', 'Helvetica Neue Bold',
+                'Liberation Sans Narrow', Impact, Arial, Helvetica, sans-serif;
+  --pf-plain:   Arial, 'Helvetica Neue', Helvetica, 'Liberation Sans',
+                'DejaVu Sans', sans-serif;
+  --pf-script:  'Comic Sans MS', 'Comic Sans', 'Chalkboard SE', 'Segoe Print',
+                'Bradley Hand', 'Marker Felt', cursive;
+
+  font-family: var(--pf-serif);
+  font-size: 10.5pt;
+  line-height: 1.06;
+  text-align: left;
+  /* Sharp, un-tinted rules: no radius, no greys, no anti-aliased hairlines. */
+  border-radius: 0;
+}
+
+/* Rich-text block defaults. `p` margins are re-stated per region (§03/§04)
+ * because the reference uses a different rhythm in body copy vs slips. */
+.paper p,
+.paper ul,
+.paper ol,
+.paper table,
+.paper h1, .paper h2, .paper h3, .paper h4 {
+  margin: 0;
+  padding: 0;
+}
+
+.paper p:last-child { margin-bottom: 0; }
+
+.paper b, .paper strong { font-weight: 700; }
+.paper i, .paper em     { font-style: italic; }
+.paper u                { text-decoration: underline; }
+
+.paper a {
+  color: inherit;
+  text-decoration: none;       /* the reference prints plain text, not links */
+}
+
+.paper img,
+.paper svg {
+  max-width: 100%;
+}
+
+/* `.indent` is emitted inside rich text (state.js) to indent a sub-block under
+ * a bullet without adding a marker of its own. */
+.paper .indent {
+  margin: 0.25em 0 0.25em 1.6em;
+}
+
+/* Never let a rich-text table push past its container. */
+.paper table {
+  max-width: 100%;
+  border-collapse: collapse;
+}
+
+
+/* =============================================================================
+ * 03 — PAGES 1 & 2  ·  .nl-*
+ * -----------------------------------------------------------------------------
+ * Markup: render.js  (SPEC §3b). Reference: docs/pg-1.png, docs/pg-2.png.
+ * All sizes are `em` of `.paper-flow`'s 10.5pt base so tier-2 scaling works.
+ * Measured off pg-1.png at 110 px/in:
+ *   content box 0.5in margins, 7.52in wide
+ *   main column 4.74in · gutter 0.13in · rail 2.645in
+ *   body line pitch 0.1477in (≈1.06em), paragraph gap exactly one line
+ * ========================================================================== */
+
+/* --- masthead tagline ----------------------------------------------------- */
+.nl-tagline {
+  font-family: var(--pf-sans);
+  font-weight: 700;
+  font-style: italic;
+  font-size: 1.1em;              /* ≈11.5pt — matches pg-1 cap height */
+  line-height: 1.18;
+  letter-spacing: 0.01em;
+  text-align: center;
+  text-transform: uppercase;
+  margin: 0 0 0.06in;
+  overflow-wrap: break-word;
+}
+
+/* --- two-column top region ------------------------------------------------ */
+/* `minmax(0, …fr)` (not plain fr) is what stops a long unbroken word in either
+ * column from widening its track past the paper. */
+.nl-top {
+  display: grid;
+  grid-template-columns: minmax(0, 64.1fr) minmax(0, 35.9fr);
+  column-gap: 0.13in;
+  align-items: start;
+}
+
+.nl-top-main { min-width: 0; }
+
+/* --- masthead type -------------------------------------------------------- */
+/* Flat heavyweight stand-in for the arched WordArt original (SPEC §3b says
+ * explicitly: do not attempt per-letter arching — it breaks rich-text editing).
+ * 3.05em ≈ 32pt renders "ST. PETER'S KEYS" at 4.38in in Arial Black — ~92% of
+ * the 4.74in main column, which matches the reference's optical weight while
+ * leaving slack so a slightly wider substitute face still stays on one line.
+ * Negative tracking buys a little more headroom. If a much longer title is
+ * typed it wraps (it never overflows) and tier 2 then shrinks the page. */
+.nl-title {
+  font-family: var(--pf-display);
+  font-weight: 900;
+  font-size: 3.05em;
+  line-height: 1.04;
+  letter-spacing: -0.02em;
+  text-align: center;
+  text-transform: uppercase;
+  margin: 0.05in 0 0;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.nl-motto {
+  font-weight: 700;
+  font-style: italic;
+  font-size: 1.8em;              /* ≈19pt */
+  line-height: 1.15;
+  text-align: center;
+  margin: 0.02in 0 0;
+}
+
+.nl-date {
+  font-weight: 700;
+  font-size: 1.85em;             /* ≈19.4pt */
+  line-height: 1.2;
+  text-align: center;
+  margin: 0.05in 0 0;
+}
+
+.nl-heading {
+  font-weight: 700;
+  font-style: italic;
+  font-size: 1.45em;             /* ≈15.2pt */
+  line-height: 1.2;
+  text-align: center;
+  text-transform: uppercase;
+  margin: 0.04in 0 0;
+}
+
+.nl-verse {
+  font-size: 0.9em;              /* ≈9.5pt */
+  line-height: 1.3;
+  text-align: center;
+  margin: 0.14in 0 0.16in;
+  overflow-wrap: break-word;
+}
+
+/* --- body copy ------------------------------------------------------------ */
+/* Justified, no first-line indent, paragraph gap = one full line (measured).
+ * `hyphens:auto` reproduces the reference's hyphenated justification
+ * ("iden-tify") and keeps rivers out of the 4.74in measure; <html lang="en">
+ * supplies the dictionary. */
+.nl-body {
+  font-size: 1em;                /* 10.5pt */
+  line-height: 1.06;
+  text-align: justify;
+  text-justify: inter-word;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+  overflow-wrap: break-word;
+}
+
+.nl-body p       { margin: 0 0 1em; text-indent: 0; }
+.nl-body p:last-child { margin-bottom: 0; }
+
+.nl-sign {
+  font-size: 1em;
+  line-height: 1.06;
+  text-align: left;
+  margin-top: 0.2in;
+}
+
+/* --- right-hand rail ------------------------------------------------------ */
+.nl-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.14in;
+  min-width: 0;                  /* long agenda text must not widen the rail */
+}
+
+/* Flush to the rail top. The reference indents the address block ~0.35in from
+ * the ruled boxes below it; it is left-aligned, not centred. */
+.nl-schoolinfo {
+  font-size: 1em;                /* ≈10.5pt — measured, larger than docs' 9pt */
+  line-height: 1.05;
+  text-align: left;
+  padding-left: 0.35in;
+  overflow-wrap: break-word;
+}
+
+/* Title and body are SEPARATELY ruled boxes with a hairline gap between them —
+ * not one box with an internal divider (docs/CLASSES.md, pg-1.png). */
+.nl-box {
+  display: flex;
+  flex-direction: column;
+  gap: 0.04in;
+  min-width: 0;
+}
+
+.nl-box-title {
+  border: 1px solid #000;
+  padding: 3px 4px;
+  font-weight: 700;
+  font-size: 1.24em;             /* ≈13pt */
+  line-height: 1.15;
+  text-align: center;
+  text-transform: uppercase;
+  overflow-wrap: break-word;
+}
+
+/* FIT ENGINE (tier 1) — THE definite height. render.js emits
+ *   <div class="nl-box-body fit" data-fit data-fit-max="10" data-fit-min="5">
+ * and fit.js compares `.fit-inner`'s scrollHeight against THIS element's
+ * clientHeight. Remove the `height` below and clientHeight becomes auto,
+ * scrollHeight always equals it, and the shrink pass does nothing at all —
+ * long agenda rows then get silently clipped instead of scaled.
+ *
+ * Heights measured off docs/pg-1.png (110 px/in):
+ *   This Week     ruled body y 2.345in → 4.345in  = 2.00in
+ *   Looking Ahead ruled body y 4.936in → 6.645in  = 1.72in
+ * They are per-box, so they are keyed off the section order in .nl-rail. */
+.nl-box-body {
+  border: 1px solid #000;
+  padding: 5px;
+  overflow: hidden;
+  height: 2in;                   /* default / first box: This Week */
+  font-size: 0.93em;             /* ≈9.75pt = 13px — see report note on
+                                  * render.js data-fit-max="10" */
+  line-height: 1.15;
+}
+
+/* Second ruled box in the rail is Looking Ahead — slightly shorter. */
+.nl-rail .nl-box:nth-of-type(2) .nl-box-body { height: 1.72in; }
+
+/* --- agenda table --------------------------------------------------------- */
+/* `table-layout:fixed` pins the date column so a long event string wraps
+ * instead of stealing width; the resulting overflow is what tier 1 measures. */
+.nl-agenda {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.nl-agenda td {
+  vertical-align: top;
+  padding: 0 0 0.45em;
+  overflow-wrap: break-word;
+}
+
+.nl-agenda-date {
+  width: 0.56in;
+  padding-right: 5px;
+  white-space: nowrap;
+}
+
+.nl-agenda-event {
+  width: auto;
+}
+
+.nl-box-note {
+  margin-top: 0.28in;
+  font-weight: 700;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
+/* --- full-width article sections ------------------------------------------ */
+.nl-articles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2in;
+  margin-top: 0.3in;
+  min-width: 0;
+}
+
+/* Page 2 is nothing but articles, so it starts near the top margin. */
+.paper[data-page="2"] .nl-articles { margin-top: 0.2in; }
+
+.nl-article {
+  break-inside: avoid;
+  page-break-inside: avoid;
+  min-width: 0;
+}
+
+.nl-article-title {
+  font-weight: 700;
+  font-size: 1em;                /* ≈10.5pt, matching the reference */
+  line-height: 1.15;
+  text-align: center;
+  text-transform: uppercase;
+  margin: 0 0 1.1em;
+  overflow-wrap: break-word;
+}
+
+.nl-article-body {
+  font-size: 1em;
+  line-height: 1.06;
+  text-align: justify;
+  text-justify: inter-word;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+  overflow-wrap: break-word;
+}
+
+.nl-article-body p       { margin: 0 0 1em; text-indent: 0; }
+.nl-article-body p:last-child { margin-bottom: 0; }
+
+/* A full blank line after a list, as in docs/pg-2.png. */
+.nl-article-body ul {
+  margin: 0.5em 0 1em;
+  padding-left: 2.2em;
+  list-style: disc outside;
+  text-align: left;              /* bullets read better un-justified */
+}
+
+.nl-article-body ol {
+  margin: 0.5em 0 1em;
+  padding-left: 2.2em;
+  list-style: decimal outside;
+  text-align: left;
+}
+
+.nl-article-body li { margin-bottom: 0.3em; }
+
+.nl-article-body .indent { margin: 0.25em 0 0.25em 1.6em; }
+
+
+/* =============================================================================
+ * 04 — PAGE 3  ·  .slip-*
+ * -----------------------------------------------------------------------------
+ * Markup: slips.js. Reference: docs/pg-3.png.
+ * Measured: left column 0.518→3.99in, right column 4.145→8.009in,
+ *           gutter 0.155in, vertical stack gap ≈0.15in, border ≈2pt.
+ *
+ * NOTE: page 3 has NO tier-1 fit by default — slips size to their content, so
+ * a blanket [data-fit] would be a permanent no-op (slips.js says so in a
+ * comment). Overflow protection here is tier 2 only, unless the author types a
+ * fixed height into the editor, which makes slips.js emit [data-fit].
+ * ========================================================================== */
+
+.slip-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 0.18in;
+  align-items: start;
+}
+
+.slip-col {
+  display: flex;
+  flex-direction: column;
+  row-gap: 0.16in;
+  min-width: 0;                  /* long headings must not widen the column */
+}
+
+.slip {
+  border: 1.5px solid #000;
+  border-radius: 0;
+  padding: 0.14in 0.16in;
+  background: #fff;
+  break-inside: avoid;
+  page-break-inside: avoid;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+/* Type hooks only — the base .slip rule carries the look. */
+.slip--lunch  { /* hook */ }
+.slip--custom { /* hook */ }
+
+/* The burst's outline IS the SVG polygon, so the wrapper contributes no
+ * chrome of its own. */
+.slip--starburst {
+  border: 0;
+  padding: 0;
+  background: none;
+}
+
+/* FIT ENGINE — `.slip-fit` is a PLAIN BLOCK. Clipping is applied only when
+ * slips.js actually emitted [data-fit] (i.e. the author gave the slip a
+ * definite inline height). An unconditional `overflow:hidden` here would clip
+ * every auto-height slip. */
+.slip-fit {
+  display: block;
+  min-width: 0;
+}
+
+.slip-fit[data-fit] { overflow: hidden; }
+
+/* --- headings / footers --------------------------------------------------- */
+.slip-heading {
+  font-weight: 700;
+  font-size: 1.05em;             /* ≈11pt */
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
+/* Inline span inside a heading — normal weight against the bold heading.
+ * Scoped: see the scope note further down (it is a content class). */
+.paper .slip-sub {
+  font-weight: 400;
+}
+
+.slip-footer {
+  margin-top: 0.16in;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
+/* NOTE ON SCOPE — .slip-center / .slip-sub / .slip-table / .slip-days are
+ * CONTENT classes: they live inside the user's rich-text HTML (state.js), so
+ * the identical markup also appears inside the editor pane's contenteditable
+ * fields. Those four are therefore scoped under `.paper` so paper.css cannot
+ * reach into app chrome (SPEC §8). The rest of the .slip-* rules only ever
+ * match preview markup, so they stay unscoped. */
+.paper .slip-center { text-align: center; }
+
+/* --- ruled blanks --------------------------------------------------------- */
+/* Real rules, never underscore glyphs: an inline-block whose bottom border
+ * lands on the text baseline. Prints as a crisp hairline at any zoom. */
+.slip-rule {
+  display: inline-block;
+  border-bottom: 1px solid #000;
+  height: 1em;
+  vertical-align: baseline;
+  flex: 0 0 auto;
+}
+
+/* --sm is used three ways: the "Gr" blank, a blank-before/after option line,
+ * and each cell of an inline choice row. 0.45in is the reference width AND the
+ * width at which three inline choices ("Ketchup | Mustard | Relish") still fit
+ * on one line inside a half-width slip — at 0.55in the third one wraps. */
+.slip-rule--grow { flex: 1 1 auto; min-width: 1.2in; }
+.slip-rule--sm   { width: 0.45in;  flex: 0 0 auto; }
+.slip-rule--md   { width: 0.85in;  flex: 0 0 auto; }
+/* The short hours blank in an After School weekday column. `width:100%` lets
+ * it fill its table cell, so the columns stay aligned however wide the day
+ * headings are — this is what replaces hand-padded underscores. */
+.slip-rule--xs   { width: 100%; min-width: 0.2in; }
+
+/* --- name / grade row ----------------------------------------------------- */
+.slip-namerow {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0.16in 0;
+  min-width: 0;
+}
+
+.slip-namerow-label {
+  font-weight: 400;
+  white-space: nowrap;
+}
+
+/* --- option lines --------------------------------------------------------- */
+.slip-fields {
+  display: flex;
+  flex-direction: column;
+  row-gap: 0.13in;
+  min-width: 0;
+}
+
+.slip-field {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.slip-field--blank-before { /* rule, then label */ }
+
+/* label, then rule — the rule is pushed to the right edge of the slip. */
+.slip-field--blank-after .slip-rule { margin-left: auto; }
+
+.slip-field--text {
+  display: block;                /* a plain full-width line, no rule */
+}
+
+.slip-field--inline {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+/* `min-width:0` is load-bearing: without it a flex item's min-content width
+ * wins over the container and a long unbreakable token escapes the sheet
+ * sideways. `white-space:nowrap` is deliberately NOT used here for the same
+ * reason — the blank and its label are held together by the flex gap instead,
+ * which survives a wrap. See the hardening block at the end of this file. */
+.slip-inline-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.slip-inline-text {
+  font-family: inherit;
+  min-width: 0;
+}
+
+.slip-label {
+  font-size: 0.95em;             /* ≈10pt */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+/* --- total --------------------------------------------------------------- */
+.slip-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 0.2in;
+  min-width: 0;
+}
+
+.slip-total-label {
+  font-weight: 400;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+/* --- custom-box body (free rich text) ------------------------------------ */
+.slip-body {
+  font-size: 0.95em;             /* ≈10pt */
+  line-height: 1.15;
+  overflow-wrap: break-word;
+}
+
+.slip-body p  { margin: 0.4em 0; }
+.slip-body p:first-child { margin-top: 0; }
+.slip-body p:last-child  { margin-bottom: 0; }
+.slip-body u  { text-decoration: underline; }
+.slip-body i  { font-style: italic; }
+
+/* Two-column label/value table used inside custom boxes (content class —
+ * scoped, see the scope note above). */
+.paper .slip-table {
+  border-collapse: collapse;
+  margin: 0.06in 0;
+}
+
+.paper .slip-table td {
+  vertical-align: top;
+  padding: 0 8px 2px 0;
+  overflow-wrap: break-word;
+}
+
+.paper .slip-table td:first-child { white-space: nowrap; }
+
+/* Mon–Fri hours grid (content class — scoped). */
+.paper .slip-days {
+  border-collapse: collapse;
+  margin: 0.02in 0 0.06in;
+}
+
+.paper .slip-days td {
+  padding: 2px 6px;
+  text-align: center;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+/* --- starburst ----------------------------------------------------------- */
+/* aspect-ratio keeps the burst's proportions while `preserveAspectRatio="none"`
+ * on the SVG lets the polygon stretch to whatever width the column gives it.
+ * 1.3/1 matches docs/pg-3.png (3.36in × 2.5in). */
+.slip-burst {
+  position: relative;
+  aspect-ratio: 1.3 / 1;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+}
+
+.slip-burst-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* `vector-effect` keeps the outline a true hairline even though the polygon is
+ * stretched non-uniformly. */
+.slip-burst-star {
+  fill: #fff;
+  stroke: #000;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.slip-burst-text {
+  position: relative;
+  z-index: 1;
+  max-width: 56%;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
+/* --- malformed slip (a hand-edited save file) ----------------------------- */
+/* Screen-only warning: print.css removes the outline so a bad file never
+ * prints a red box. */
+.slip--unknown {
+  border: 0;
+  padding: 0.14in 0.16in;
+  outline: 2px dashed #c0392b;
+  outline-offset: -2px;
+}
+
+.slip-unknown {
+  font-size: 0.85em;
+  font-style: italic;
+  text-align: center;
+  color: #555;
+}
+
+
+/* =============================================================================
+ * 05 — PAGE 4  ·  .cal-*
+ * -----------------------------------------------------------------------------
+ * Markup: calendar.js. Reference: docs/pg-4.png (landscape).
+ * Measured: grid 0.473→10.509in wide, top rule 1.173in, bottom rule 8.145in,
+ *           header band 0.191→1.045in, day-name band 0.272in tall.
+ *
+ * The reference sizes its week rows to content; docs/CLASSES.md mandates equal
+ * rows (`flex:1 1 0`) and that is what is implemented — see the report.
+ * ========================================================================== */
+
+.cal-sheet {
+  display: flex;
+  flex-direction: column;
+  height: 100%;                  /* resolves against .paper-flow's height:100% */
+  min-height: 0;
+}
+
+/* --- header band ---------------------------------------------------------- */
+.cal-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.1in;
+  margin-bottom: 0.12in;
+  flex: 0 0 auto;
+}
+
+.cal-logo {
+  flex: 0 0 auto;
+  width: 0.95in;
+  display: flex;
+  align-items: center;
+  padding: 1px;
+  border: 1px solid #ccc;        /* the thin light frame in the reference */
+  background: #fff;
+}
+
+.cal-logo-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+/* Heavy-ruled month box. `overflow:hidden` is deliberate: a pasted 60-character
+ * school name must be clipped inside the box rather than shoving the contact
+ * block off the sheet. */
+.cal-titlebox {
+  border: 3px solid #000;
+  padding: 0.06in;
+  display: flex;
+  align-items: center;
+  gap: 0.18in;
+  overflow: hidden;
+  min-width: 0;
+  background: #fff;
+}
+
+/* Large, light Arial-family caps. `nowrap` is safe because .cal-ident carries
+ * `min-width:0` and absorbs all the flex shrink. */
+.cal-month {
+  font-family: var(--pf-plain);
+  font-weight: 300;
+  font-size: 3em;                /* ≈31.5pt — measured off pg-4.png */
+  line-height: 1;
+  letter-spacing: 0.01em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.cal-ident {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-width: 0;                  /* lets the school name wrap, not overflow */
+  text-align: center;
+}
+
+.cal-schoolname,
+.cal-website {
+  font-family: var(--pf-script);
+  font-weight: 700;
+  font-size: 1.05em;             /* ≈11pt */
+  line-height: 1.2;
+  text-align: center;
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+
+.cal-contact {
+  font-family: var(--pf-serif);
+  font-size: 0.62em;             /* ≈6.5pt */
+  line-height: 1.25;
+  text-align: left;
+  align-self: start;             /* top-aligned in the reference */
+  max-width: 2.1in;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+/* --- ruled grid ---------------------------------------------------------- */
+/* FIT ENGINE — `flex:1` + `min-height:0` is what turns the remaining sheet
+ * height into a DEFINITE height for the week rows below. Drop `min-height:0`
+ * and the flex item refuses to shrink below its content, the rows measure
+ * auto, and every per-cell fit pass becomes a no-op.
+ * `border-bottom:none` because each `.cal-week` draws its own bottom rule —
+ * that is how the last week gets the closing rule without doubling it. */
+.cal-grid {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #000;
+  border-bottom: none;
+  min-height: 0;
+}
+
+/* The day-name band never shrinks: `flex:0 0 auto`. The reference shows no
+ * vertical rules through it, so no per-cell borders here. */
+.cal-dayrow {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-bottom: 1px solid #000;
+  flex: 0 0 auto;
+}
+
+.cal-dayname {
+  font-family: var(--pf-serif);
+  font-size: 1.2em;              /* ≈12.6pt */
+  line-height: 1.15;
+  text-align: center;
+  padding: 0.035in 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* FIT ENGINE — equal-height week rows. `flex:1 1 0` + `min-height:0` gives
+ * every row an identical DEFINITE height, which is what makes each
+ * `.cal-cell`'s clientHeight measurable and the per-cell shrink pass real.
+ * If you change this to `flex:0 0 auto` the calendar will look fine with the
+ * seeded content and silently clip the moment a day has five events. */
+.cal-week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  flex: 1 1 0;
+  min-height: 0;
+  border-bottom: 1px solid #000;
+}
+
+/* FIT ENGINE — this element carries [data-fit] (calendar.js). It is a grid
+ * item in a definite-height row, so `align-self: stretch` (the default) gives
+ * it a definite height; `min-height:0` stops the content from forcing the row
+ * taller, and `overflow:hidden` is the clip the fit pass is protecting.
+ *
+ * `font-size` here is the tier-1 ceiling expressed in CSS: 0.715em of 10.5pt
+ * is 7.5pt = 10px, which is what calendar.js's CELL_FIT_MAX should allow.
+ * See the report — it currently ships as '8'. */
+.cal-cell {
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+  padding: 0.03in 0.04in;
+  border-right: 1px solid #000;
+  text-align: center;
+  font-size: 0.715em;
+}
+
+.cal-week .cal-cell:last-child { border-right: none; }
+
+/* An empty ruled cell — no extra chrome, just the rules from its neighbours. */
+.cal-cell--blank { /* hook */ }
+
+.cal-daynum {
+  font-family: var(--pf-script);
+  font-weight: 700;
+  font-size: 2.8em;
+  line-height: 1;
+  text-align: center;
+  margin-bottom: 0.02in;
+}
+
+.cal-events {
+  font-family: var(--pf-script);
+  font-size: 1em;
+  line-height: 1.15;
+  text-align: center;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  min-width: 0;
+}
+
+/* Per-density tuning: a 6-week month has ~20% less height per row, a 4-week
+ * month ~25% more. calendar.js writes [data-weeks] on .cal-grid. */
+.cal-grid[data-weeks="6"] .cal-daynum { font-size: 2.3em; }
+.cal-grid[data-weeks="4"] .cal-daynum { font-size: 3.2em; }
+
+
+/* =============================================================================
+ * 06 — SCREEN-ONLY AFFORDANCES
+ * -----------------------------------------------------------------------------
+ * Everything in this section is neutralised by print.css. If you add another
+ * screen affordance here, add its print override there too.
+ * ========================================================================== */
+
+/* fit.js adds this to whatever still does not fit at its minimum size. It is a
+ * warning to the author, never ink on the page. */
+.is-overflowing {
+  outline: 2px dashed #c0392b;
+  outline-offset: -2px;
+}
+
+/* app.js toggles `.is-target` on the preview regions bound to the editor field
+ * that currently has focus (SPEC §9). */
+.rt-out.is-target {
+  background: rgba(255, 235, 59, 0.38);
+  box-shadow: 0 0 0 2px #fbc02d;
+}
+
+
+/* -----------------------------------------------------------------------------
+ * After School Sign Up  (.slip--afterschool)
+ *
+ * Everything here is table- or flex-driven so the weekday columns line up on
+ * their own. slips.js generates the rules and the XXX cells from structured
+ * data; nothing in this box is hand-aligned text.
+ * -------------------------------------------------------------------------- */
+.slip-as-rates {
+  text-align: center;
+  margin: 0.05in 0 0.07in;
+  line-height: 1.2;
+}
+
+.slip-as-notes {
+  margin: 0 0 0.07in;
+  line-height: 1.2;
+}
+
+/* Two-column rate/policy table: a narrow label column that never wraps mid
+ * word, and a detail column that takes the rest. */
+.slip-as-terms {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 0.1in;
+}
+
+.slip-as-terms td {
+  vertical-align: top;
+  padding: 0 0 0.03in;
+  line-height: 1.2;
+}
+
+.slip-as-term {
+  width: 1.05in;
+  padding-right: 0.06in !important;
+}
+
+.slip-as-termval { width: auto; }
+
+.slip-as-student {
+  margin: 0 0 0.11in;
+  break-inside: avoid;
+}
+
+/* The hours grid. `table-layout: fixed` is load-bearing: it makes every
+ * weekday column exactly the same width regardless of the heading text, which
+ * is what keeps the blanks and the XXX markers in a straight line. */
+.slip-as-days {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  margin: 0.02in 0 0;
+}
+
+.slip-as-days td {
+  text-align: center;
+  padding: 0 0.01in;
+  line-height: 1.2;
+}
+
+/* Narrow leading column holding "Hrs." — sized to the word, not shared out. */
+.slip-as-days .slip-as-rowlabel {
+  width: 0.34in;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.slip-as-dayname {
+  font-size: 0.95em;
+  white-space: nowrap;
+}
+
+.slip-as-dayrow td { padding-top: 0.05in; }
+
+.slip-as-daycell { vertical-align: bottom; }
+
+/* XXX sits on the same baseline as the neighbouring rules. */
+.slip-as-daycell--xxx {
+  vertical-align: baseline;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* =============================================================================
+ * 07 — CONTAINMENT HARDENING
+ * -----------------------------------------------------------------------------
+ * Belt-and-braces against the one failure mode the shrink-to-fit engine cannot
+ * solve on its own: a single unbreakable token (a pasted URL, an accidental
+ * 200-character "word") is atomic, so no font-size reduction will ever make it
+ * narrower than its own glyphs. Left alone it escapes the sheet SIDEWAYS,
+ * which is the ugliest possible print failure.
+ *
+ * Two rules are needed together, and the distinction matters:
+ *
+ *   overflow-wrap: break-word  — breaks the token when it is laid out, but
+ *                                does NOT reduce the element's min-content
+ *                                width. Inside a flex or grid track that
+ *                                min-content width still wins, and the item
+ *                                pushes past its container anyway.
+ *   overflow-wrap: anywhere    — also reduces min-content width, so the flex
+ *                                or grid track can actually shrink.
+ *
+ * `anywhere` is therefore the correct choice for anything holding user text,
+ * and `min-width: 0` is required alongside it on flex/grid children because
+ * their default `min-width: auto` re-establishes the same floor.
+ *
+ * Regression covered by the "Overflow stress" section of tools/verify.js.
+ * ========================================================================== */
+
+.paper .rt-out,
+.paper .nl-body,
+.paper .nl-verse,
+.paper .nl-sign,
+.paper .nl-schoolinfo,
+.paper .nl-agenda-date,
+.paper .nl-agenda-event,
+.paper .nl-box-note,
+.paper .nl-article-title,
+.paper .nl-article-body,
+.paper .nl-title,
+.paper .nl-motto,
+.paper .nl-date,
+.paper .nl-heading,
+.paper .nl-tagline,
+.paper .slip-heading,
+.paper .slip-label,
+.paper .slip-body,
+.paper .slip-footer,
+.paper .slip-total-label,
+.paper .slip-namerow-label,
+.paper .slip-inline-text,
+.paper .slip-burst-text,
+.paper .cal-events,
+.paper .cal-daynum,
+.paper .cal-schoolname,
+.paper .cal-website,
+.paper .cal-contact,
+.paper .cal-month {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* Final backstop. Each of these is a bordered box with a hard edge on the
+ * page; clipping at that edge is strictly better than letting ink run into the
+ * gutter or off the trim. The author still sees the `.is-overflowing` warning
+ * on screen, so over-long content is never silently lost without a signal. */
+.paper .slip,
+.paper .nl-box,
+.paper .nl-rail,
+.paper .nl-top-main,
+.paper .nl-articles,
+.paper .cal-titlebox {
+  min-width: 0;
+  overflow: hidden;
+}
+
+
+/* =============================================================================
+ * 08 — CLICK-TO-EDIT AFFORDANCE (screen only)
+ * -----------------------------------------------------------------------------
+ * Clicking a region on the paper jumps to the editor field that feeds it
+ * (app.js `onPreviewClick`). Wrapped in `@media screen` so none of it can
+ * reach the printed sheet — a hover state cannot trigger in print, but the
+ * cursor and the transition have no business being in the export either.
+ *
+ * `.cal-cell` and `.slip` get the affordance as whole blocks because app.js
+ * treats them as clickable in their entirety: a calendar day is mostly empty
+ * space beneath a short event line, so requiring a hit on the glyphs would
+ * make the feature feel broken.
+ * ========================================================================== */
+@media screen {
+  .paper-flow [data-bind],
+  .paper-flow [data-edits],
+  .paper-flow .cal-cell,
+  .paper-flow .slip {
+    cursor: pointer;
+  }
+
+  /* Soft wash + inset ring, keyed off the same yellow as the focus highlight
+   * so hovering and editing read as one interaction. Deliberately weaker than
+   * `.rt-out.is-target`, which marks the field actually being edited. */
+  .paper-flow [data-bind]:hover,
+  .paper-flow [data-edits]:hover,
+  .paper-flow .cal-cell:hover,
+  .paper-flow .slip:hover {
+    background-color: rgba(255, 235, 59, 0.16);
+    box-shadow: inset 0 0 0 1px rgba(251, 192, 45, 0.85);
+    border-radius: 2px;
+  }
+
+  /* A hovered container must not out-shout the specific region inside it that
+   * the click would actually target. */
+  .paper-flow .cal-cell:hover [data-bind]:hover,
+  .paper-flow .slip:hover [data-bind]:hover,
+  .paper-flow .cal-titlebox:hover [data-edits]:hover {
+    background-color: rgba(255, 235, 59, 0.30);
+  }
+
+  /* The turning leaf is not a click target, and the burst is decorative. */
+  .paper.is-turning .paper-flow [data-bind],
+  .paper.is-turning .paper-flow [data-edits],
+  .paper.is-turning .paper-flow .cal-cell,
+  .paper.is-turning .paper-flow .slip {
+    cursor: default;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  @media screen {
+    .paper-flow [data-bind],
+    .paper-flow [data-edits],
+    .paper-flow .cal-cell,
+    .paper-flow .slip {
+      transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
+    }
+  }
+}

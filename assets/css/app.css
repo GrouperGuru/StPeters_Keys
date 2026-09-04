@@ -1,0 +1,3270 @@
+/* =============================================================================
+ * app.css — St. Peter's Keys :: APPLICATION SHELL (screen chrome only)
+ *
+ * Scope contract (SPEC §8):
+ *   OWNS  : design tokens, app frame, toolbar, editor rail, accordions, form
+ *           controls, resizer, preview canvas, thumbnail rail, toasts, a11y.
+ *   OWNS  : #preview-pane, #stage-viewport, #stage-sizer, #page-stage
+ *           (these are chrome, not paper).
+ *   NEVER : .paper or ANY descendant of it — .paper-flow, .paper-shade, .nl-*,
+ *           .slip-*, .cal-*, .fit, .fit-inner, .rt-out. Those belong to
+ *           paper.css. There is not one selector for them in this file.
+ *   NEVER : transform on #page-stage, or width/height on #stage-sizer /
+ *           #page-stage — flip.js computes and owns those every relayout.
+ *
+ * No @import. No web fonts. No network requests. Plain selectors + custom
+ * properties only (no CSS nesting, no :has()) so the file works in every
+ * current evergreen browser and over file://.
+ *
+ * TABLE OF CONTENTS
+ *   01  Design tokens (:root)
+ *   02  Reset & base
+ *   03  App frame  (#app / #workspace / rail width plumbing)
+ *   04  Toolbar    (#toolbar, .tb-*)
+ *   05  Rail resizer (#rail-resizer)
+ *   06  Editor rail (#editor-pane, #editor-scroll, scrollbars)
+ *   07  Accordion sections (.ed-section / .ed-head / .ed-body)
+ *   08  Fields & labels (.ed-field, .ed-label, .ed-hint, .ed-cols, .ed-inline)
+ *   09  Rich-text inputs (.rt)
+ *   10  Plain inputs & selects (.pt), checkbox rows (.ed-check)
+ *   11  Editor buttons (.ed-btn, .ed-add, .ed-toolbar)
+ *   12  Repeatable panels (.ed-list, .ed-row, .ed-card)
+ *   13  Preview canvas (#preview-pane, #stage-viewport, #stage-sizer, #page-stage)
+ *   14  Thumbnail rail (#thumb-rail, .thumb)
+ *   15  Toasts (#toasts, .toast)
+ *   16  Utilities (.sr-only, state helpers)
+ *   17  Reduced motion
+ *   18  Dark scheme retune (chrome only — paper always stays white)
+ * ========================================================================== */
+
+
+/* =============================================================================
+ * 01 — DESIGN TOKENS
+ * -----------------------------------------------------------------------------
+ * Two layers on purpose:
+ *   a) raw ramps  (--n-*, --brand-*, --ok/--warn/--danger)   = the palette
+ *   b) semantic aliases (--surface-*, --text-*, --border-*)  = what rules use
+ * Only layer (b) is re-pointed in the dark block at §18, so every component
+ * flips for free.
+ * ========================================================================== */
+:root {
+  color-scheme: light;
+
+  /* --- neutral ramp ------------------------------------------------------ */
+  --n-0:    #ffffff;
+  --n-25:   #fbfcfd;
+  --n-50:   #f6f8fa;
+  --n-100:  #eef1f5;
+  --n-150:  #e6eaf0;
+  --n-200:  #d9dee7;
+  --n-300:  #c2cad6;
+  --n-400:  #9aa4b2;
+  --n-500:  #6c7684;
+  --n-600:  #4e5865;
+  --n-700:  #38414e;
+  --n-800:  #242b35;
+  --n-900:  #151a21;
+  --n-950:  #0b0f14;
+
+  /* --- brand navy + interactive tints ----------------------------------- */
+  --brand:       #003366;   /* school navy — the anchor */
+  --brand-900:   #001c3a;
+  --brand-800:   #002247;
+  --brand-700:   #002b57;
+  --brand-600:   #003f7d;   /* hover on solid navy */
+  --brand-500:   #0b5390;
+  --brand-400:   #1f6fb2;   /* accent: links, active outlines */
+  --brand-300:   #5b9bd0;
+  --brand-200:   #a8c9e6;
+  --brand-100:   #d9e8f5;
+  --brand-50:    #eef5fb;   /* faint tint behind focused fields */
+
+  /* --- semantic status --------------------------------------------------- */
+  --ok:          #1a7f4b;
+  --ok-strong:   #14653b;
+  --ok-bg:       #e6f5ec;
+  --ok-border:   #a8d9bd;
+
+  --warn:        #8a5a00;
+  --warn-strong: #6f4800;
+  --warn-bg:     #fdf3e2;
+  --warn-border: #e8cd9a;
+
+  --danger:        #b3261e;
+  --danger-strong: #8f1d17;
+  --danger-bg:     #fdecea;
+  --danger-border: #eeb4af;
+
+  /* --- semantic surfaces (re-pointed in dark mode) ----------------------- */
+  --surface-app:     var(--n-50);    /* chrome backdrop                     */
+  --surface-rail:    var(--n-25);    /* editor rail                         */
+  --surface-bar:     var(--n-0);     /* toolbar                             */
+  --surface-raised:  var(--n-0);     /* cards, buttons, inputs              */
+  --surface-hover:   var(--n-100);   /* button hover                        */
+  --surface-active:  var(--n-150);   /* button :active                      */
+  --surface-sunken:  var(--n-50);    /* inset panels (.ed-row)              */
+  --surface-input:   var(--n-0);
+
+  --canvas:        #2b3038;          /* preview pane — deep neutral, not black */
+  --canvas-deep:   #21262d;
+  --canvas-edge:   #171b21;
+  --canvas-grid:   rgba(255, 255, 255, 0.028);
+
+  /* --- semantic text ----------------------------------------------------- */
+  --text:          var(--n-800);
+  --text-strong:   var(--n-900);
+  --text-muted:    var(--n-600);
+  --text-subtle:   var(--n-500);
+  --text-faint:    var(--n-400);
+  --text-invert:   var(--n-0);
+  --text-brand:    var(--brand);
+  --text-on-canvas: #cfd6df;
+
+  /* --- semantic borders -------------------------------------------------- */
+  --border-subtle: var(--n-150);
+  --border:        var(--n-200);
+  --border-strong: var(--n-300);
+  --hairline:      var(--n-200);
+
+  /* --- focus ------------------------------------------------------------- */
+  --focus:         var(--brand-400);
+  --focus-ring:    0 0 0 2px var(--surface-raised), 0 0 0 4px var(--brand-300);
+  --focus-ring-flat: 0 0 0 3px var(--brand-200);
+  --field-ring:    0 0 0 2px var(--brand);          /* .rt focus, radius-safe */
+
+  /* --- spacing scale (8px based, 4px half-step) -------------------------- */
+  --sp-0:  0;
+  --sp-05: 2px;
+  --sp-1:  4px;
+  --sp-2:  8px;
+  --sp-3:  12px;
+  --sp-4:  16px;
+  --sp-5:  24px;
+  --sp-6:  32px;
+  --sp-7:  40px;
+  --sp-8:  48px;
+  --sp-9:  64px;
+
+  /* --- radii ------------------------------------------------------------- */
+  --r-xs:   3px;
+  --r-sm:   4px;
+  --r-md:   6px;
+  --r-lg:   8px;
+  --r-xl:   10px;
+  --r-pill: 999px;
+
+  /* --- shadow ramp ------------------------------------------------------- */
+  --sh-1: 0 1px 1px rgba(16, 24, 40, 0.04),
+          0 1px 2px rgba(16, 24, 40, 0.06);
+  --sh-2: 0 1px 2px rgba(16, 24, 40, 0.06),
+          0 2px 6px rgba(16, 24, 40, 0.08);
+  --sh-3: 0 2px 4px rgba(16, 24, 40, 0.06),
+          0 6px 16px rgba(16, 24, 40, 0.10);
+  --sh-4: 0 8px 24px rgba(16, 24, 40, 0.14),
+          0 2px 6px rgba(16, 24, 40, 0.08);
+  --sh-bar: 0 1px 0 var(--hairline),
+            0 2px 8px rgba(16, 24, 40, 0.06);
+  --sh-inset: inset 0 1px 2px rgba(16, 24, 40, 0.06);
+  --sh-paper-plate: 0 24px 60px rgba(0, 0, 0, 0.45),
+                    0 2px 8px rgba(0, 0, 0, 0.30);
+
+  /* --- typography -------------------------------------------------------- */
+  --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Segoe UI Variable Text",
+             Roboto, "Helvetica Neue", Arial, "Noto Sans", "Liberation Sans", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-15: 15px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+
+  --fw-regular: 400;
+  --fw-medium:  500;
+  --fw-semi:    600;
+  --fw-bold:    700;
+
+  --lh-tight: 1.25;
+  --lh-snug:  1.35;
+  --lh-base:  1.5;
+
+  --track-caps: 0.06em;   /* letter-spacing for small uppercase labels */
+
+  /* --- motion ------------------------------------------------------------ */
+  --dur-1: 90ms;
+  --dur-2: 150ms;
+  --dur-3: 240ms;
+  --dur-4: 380ms;
+  --ease-out:      cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-emphasis: cubic-bezier(0.36, 0.06, 0.2, 1);  /* matches the page turn */
+
+  /* --- select caret (inline data-URI; re-pointed in the dark block) ------ */
+  --chevron-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%234e5865' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+
+  /* --- z-index ladder ---------------------------------------------------- */
+  --z-canvas:   0;
+  --z-stage:    1;
+  --z-thumbs:   20;
+  --z-rail:     30;
+  --z-resizer:  40;
+  --z-toolbar:  50;
+  --z-overlay:  60;
+  --z-popover:  70;
+  --z-toast:    80;
+
+  /* --- layout metrics ---------------------------------------------------- */
+  --tb-h:        48px;   /* toolbar row height — fixed, never wraps          */
+  --rail-w:      380px;  /* JS overwrites this on #app while dragging        */
+  --rail-min:    300px;
+  --rail-max:    640px;
+  --resizer-w:   6px;
+  --thumb-h:     78px;
+  --thumb-w:     46px;
+  --stage-pad:   var(--sp-5);
+  --scrollbar-w: 10px;
+}
+
+
+/* =============================================================================
+ * 02 — RESET & BASE
+ * ========================================================================== */
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+/* No page-level scrolling anywhere. Only #editor-scroll and #stage-viewport
+ * are scroll containers. */
+html { overflow: hidden; }
+
+body {
+  overflow: hidden;
+  background: var(--surface-app);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-13);
+  line-height: var(--lh-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  overscroll-behavior: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  margin: 0;
+}
+
+button { background: none; border: 0; padding: 0; }
+
+/* Global focus policy: never a bare UA outline on chrome, always an explicit
+ * high-contrast ring per component. Anything not covered gets this default. */
+:focus { outline: none; }
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+::selection {
+  background: var(--brand-200);
+  color: var(--brand-900);
+}
+
+/* Shared thin-scrollbar treatment (Firefox + WebKit/Blink). */
+.has-thin-scroll,
+#editor-scroll,
+#format-group,
+#thumb-rail {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+#editor-scroll::-webkit-scrollbar,
+#format-group::-webkit-scrollbar,
+#thumb-rail::-webkit-scrollbar,
+.rt::-webkit-scrollbar,
+.ed-card-body::-webkit-scrollbar {
+  width: var(--scrollbar-w);
+  height: var(--scrollbar-w);
+}
+
+#editor-scroll::-webkit-scrollbar-track,
+#format-group::-webkit-scrollbar-track,
+#thumb-rail::-webkit-scrollbar-track,
+.rt::-webkit-scrollbar-track,
+.ed-card-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+#editor-scroll::-webkit-scrollbar-thumb,
+#format-group::-webkit-scrollbar-thumb,
+#thumb-rail::-webkit-scrollbar-thumb,
+.rt::-webkit-scrollbar-thumb,
+.ed-card-body::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--r-pill);
+}
+
+#editor-scroll::-webkit-scrollbar-thumb:hover,
+#format-group::-webkit-scrollbar-thumb:hover,
+#thumb-rail::-webkit-scrollbar-thumb:hover,
+.rt::-webkit-scrollbar-thumb:hover {
+  background: var(--n-400);
+  background-clip: padding-box;
+}
+
+#stage-viewport { scrollbar-color: rgba(255, 255, 255, 0.22) transparent; }
+#stage-viewport::-webkit-scrollbar { width: 12px; height: 12px; }
+#stage-viewport::-webkit-scrollbar-track { background: transparent; }
+#stage-viewport::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.18);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--r-pill);
+}
+#stage-viewport::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.30);
+  background-clip: padding-box;
+}
+
+
+/* =============================================================================
+ * 03 — APP FRAME
+ * -----------------------------------------------------------------------------
+ * #app        : full-viewport grid, one fixed toolbar row + one filling row.
+ * #workspace  : 3 columns — rail | resizer | preview.
+ * --rail-w    : declared on :root, re-declared by JS on #app (inline style) so
+ *               dragging the resizer only touches one property.
+ * ========================================================================== */
+#app {
+  --rail-w: 380px;                        /* JS sets this inline on #app */
+  display: grid;
+  grid-template-rows: var(--tb-h) minmax(0, 1fr);
+  grid-template-columns: 100%;
+  height: 100vh;
+  height: 100dvh;
+  width: 100%;
+  overflow: hidden;
+  background: var(--surface-app);
+  isolation: isolate;
+}
+
+#workspace {
+  display: grid;
+  grid-template-columns:
+    clamp(var(--rail-min), var(--rail-w), var(--rail-max))
+    var(--resizer-w)
+    minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* Collapsed rail: column goes to 0 but the resizer keeps its full hit area so
+ * the user can always drag the rail back out. */
+body.is-collapsed-rail #workspace {
+  grid-template-columns: 0 var(--resizer-w) minmax(0, 1fr);
+}
+
+body.is-collapsed-rail #editor-pane {
+  border-right-color: transparent;
+  pointer-events: none;
+}
+
+body.is-collapsed-rail #editor-scroll {
+  visibility: hidden;   /* not display:none — preserves scroll position */
+}
+
+/* While dragging, suppress transitions and text selection app-wide. JS is
+ * expected to add/remove body.is-resizing around the drag. */
+body.is-resizing {
+  cursor: col-resize;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+body.is-resizing #editor-pane,
+body.is-resizing #preview-pane,
+body.is-resizing #rail-resizer {
+  transition: none;
+}
+
+
+/* =============================================================================
+ * 04 — TOOLBAR  (requirement 1a: ONE bar holds Save/Load/PDF *and* formatting)
+ * -----------------------------------------------------------------------------
+ * Single row, fixed height, never wraps. Narrow windows shrink and then
+ * horizontally scroll #format-group instead of breaking the grid.
+ * ========================================================================== */
+#toolbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-toolbar);
+  grid-row: 1;
+  display: flex;
+  flex-wrap: nowrap;              /* fixed-height contract: never a 2nd row */
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--tb-h);
+  min-width: 0;
+  padding: 0 var(--sp-3);
+  background: var(--surface-bar);
+  box-shadow: var(--sh-bar);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.tb-group {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.tb-spacer {
+  flex: 1 1 auto;
+  min-width: var(--sp-2);
+}
+
+.tb-sep {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 22px;
+  margin: 0 var(--sp-2);
+  background: var(--hairline);
+}
+
+/* --- brand lockup ------------------------------------------------------- */
+.tb-brand {
+  gap: var(--sp-2);
+  padding-right: var(--sp-1);
+  min-width: 0;
+}
+
+.tb-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-md);
+  background: linear-gradient(160deg, var(--brand-600), var(--brand-900));
+  color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18), var(--sh-1);
+}
+
+.tb-logo svg {
+  display: block;
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke: currentColor;
+}
+
+.tb-title {
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.01em;
+  color: var(--text-strong);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* --- toolbar buttons ---------------------------------------------------- */
+.tb-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  flex: 0 0 auto;
+  height: 30px;
+  min-width: 30px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--sh-1);
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    border-color var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+.tb-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+
+.tb-btn:active {
+  background: var(--surface-active);
+  box-shadow: var(--sh-inset);
+  transform: translateY(0.5px);
+}
+
+.tb-btn:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
+.tb-btn:disabled,
+.tb-btn[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.45;
+  box-shadow: none;
+  background: var(--surface-raised);
+  border-color: var(--border-subtle);
+  color: var(--text-faint);
+}
+
+/* live formatting state, e.g. bold is on at the caret */
+.tb-btn[aria-pressed="true"] {
+  background: var(--brand-100);
+  border-color: var(--brand-300);
+  color: var(--brand-800);
+  box-shadow: inset 0 1px 2px rgba(0, 51, 102, 0.12);
+}
+
+.tb-btn[aria-pressed="true"]:hover {
+  background: var(--brand-200);
+  border-color: var(--brand-400);
+}
+
+/* primary — Save */
+.tb-btn--primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--text-invert);
+  font-weight: var(--fw-semi);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.14), var(--sh-1);
+}
+
+.tb-btn--primary:hover {
+  background: var(--brand-600);
+  border-color: var(--brand-600);
+  color: var(--text-invert);
+}
+
+.tb-btn--primary:active {
+  background: var(--brand-800);
+  border-color: var(--brand-800);
+}
+
+.tb-btn--primary:disabled {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--text-invert);
+}
+
+/* icon — square, ~30px, glyph centred */
+.tb-btn--icon {
+  width: 30px;
+  min-width: 30px;
+  padding: 0;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semi);
+}
+
+.tb-btn--icon svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.tb-btn--icon b,
+.tb-btn--icon i,
+.tb-btn--icon u {
+  font-size: var(--fs-13);
+  line-height: 1;
+}
+
+/* quiet — chromeless, e.g. the zoom-percentage button */
+.tb-btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+}
+
+.tb-btn--quiet:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-subtle);
+  color: var(--text-strong);
+}
+
+.tb-btn--quiet:active { background: var(--surface-active); }
+
+/* --- compact native selects -------------------------------------------- */
+.tb-select {
+  flex: 0 1 auto;
+  height: 30px;
+  max-width: 140px;
+  min-width: 68px;
+  padding: 0 26px 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background-color: var(--surface-raised);
+  background-image: var(--chevron-img);
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 10px 10px;
+  color: var(--text);
+  font-size: var(--fs-12);
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--sh-1);
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  text-overflow: ellipsis;
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    border-color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+.tb-select:hover {
+  background-color: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.tb-select:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
+.tb-select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Native option lists can't be fully styled; make sure they at least inherit
+ * a sane colour pair in both schemes. */
+.tb-select option,
+.pt option {
+  background: var(--surface-raised);
+  color: var(--text);
+}
+
+/* --- page indicator ---------------------------------------------------- */
+.tb-pageinfo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 46px;
+  height: 30px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* --- graceful degradation at narrow widths ------------------------------
+ * The format cluster is the only elastic region: it shrinks, then scrolls
+ * horizontally. Vertical padding + negative margin keep focus rings from
+ * being clipped by overflow-y:hidden. */
+#format-group {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 5px;
+  margin-block: -5px;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Brand text is the first thing to go when space runs out. */
+@media (max-width: 1180px) {
+  .tb-title { display: none; }
+}
+
+@media (max-width: 1040px) {
+  .tb-sep { margin: 0 var(--sp-1); }
+  #toolbar { gap: var(--sp-1); padding: 0 var(--sp-2); }
+  .tb-select { max-width: 108px; }
+}
+
+@media (max-width: 880px) {
+  .tb-btn { padding: 0 var(--sp-2); }
+}
+
+
+/* =============================================================================
+ * 05 — RAIL RESIZER
+ * -----------------------------------------------------------------------------
+ * 6px column. Hit area is widened with a transparent ::before overlay so the
+ * grab target is comfortable without changing the grid metric.
+ * ========================================================================== */
+#rail-resizer {
+  position: relative;
+  z-index: var(--z-resizer);
+  grid-column: 2;
+  align-self: stretch;
+  width: var(--resizer-w);
+  background: var(--border-subtle);
+  cursor: col-resize;
+  touch-action: none;
+  transition: background-color var(--dur-2) var(--ease-standard);
+}
+
+/* widened invisible hit area (±5px) */
+#rail-resizer::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  right: -5px;
+}
+
+/* visible grip: three short bars, only inked on hover/focus/drag */
+#rail-resizer::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 2px;
+  height: 26px;
+  margin: -13px 0 0 -1px;
+  border-radius: var(--r-pill);
+  background: var(--n-400);
+  opacity: 0;
+  transition: opacity var(--dur-2) var(--ease-standard);
+}
+
+#rail-resizer:hover,
+#rail-resizer.is-active {
+  background: var(--brand-200);
+}
+
+#rail-resizer:hover::after,
+#rail-resizer.is-active::after {
+  opacity: 1;
+  background: var(--brand);
+}
+
+#rail-resizer:focus-visible {
+  outline: none;
+  background: var(--brand-300);
+  box-shadow: 0 0 0 2px var(--brand-400);
+}
+
+#rail-resizer:focus-visible::after {
+  opacity: 1;
+  background: var(--brand-900);
+}
+
+body.is-collapsed-rail #rail-resizer {
+  background: var(--border-strong);
+}
+
+
+/* =============================================================================
+ * 06 — EDITOR RAIL
+ * ========================================================================== */
+#editor-pane {
+  position: relative;
+  z-index: var(--z-rail);
+  grid-column: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;                 /* the scroll lives on #editor-scroll */
+  background: var(--surface-rail);
+  border-right: 1px solid var(--hairline);
+}
+
+#editor-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: var(--sp-4) var(--sp-4) var(--sp-9);
+  scroll-behavior: smooth;
+
+  /* Container queries drive .ed-cols so the 2→1 column collapse tracks the
+   * *rail* width, not the viewport. Query the content box of this element. */
+  container-type: inline-size;
+  container-name: rail;
+}
+
+
+/* =============================================================================
+ * 07 — ACCORDION SECTIONS
+ * -----------------------------------------------------------------------------
+ * NOTE ON THE COLLAPSE TECHNIQUE: .ed-body uses display:none when the section
+ * lacks .is-open. This is deliberate and preferred over a height animation:
+ *   - no JS height measuring, no ResizeObserver, no scrollHeight caching;
+ *   - contenteditable fields inside a height-animated container can be
+ *     mid-transition when focus lands, which scrolls the caret to nowhere;
+ *   - collapsed fields are removed from the tab order for free.
+ * Only the chevron animates. Robustness beats the flourish here.
+ * ========================================================================== */
+.ed-section {
+  margin: 0 0 var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--sh-1);
+  overflow: hidden;
+}
+
+.ed-section:last-child { margin-bottom: 0; }
+
+.ed-section.is-open {
+  border-color: var(--border);
+  box-shadow: var(--sh-2);
+}
+
+/* --- section header (a real full-width button) -------------------------- */
+.ed-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  min-height: 42px;
+  padding: var(--sp-2) var(--sp-3);
+  border: 0;
+  border-radius: var(--r-lg);
+  background: transparent;
+  color: var(--text-strong);
+  text-align: left;
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color var(--dur-1) var(--ease-standard);
+}
+
+.ed-head:hover { background: var(--surface-hover); }
+.ed-head:active { background: var(--surface-active); }
+
+.ed-head:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+
+.ed-section.is-open > .ed-head {
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-app);
+}
+
+.ed-section.is-open > .ed-head:hover { background: var(--surface-hover); }
+
+.ed-head-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.005em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* --- page badge (clickable: navigates the preview) ---------------------- */
+.ed-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: var(--text-invert);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), var(--sh-1);
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.ed-badge:hover {
+  background: var(--brand-500);
+  transform: scale(1.08);
+  box-shadow: 0 0 0 3px var(--brand-100), var(--sh-1);
+}
+
+.ed-badge:active { transform: scale(0.96); }
+
+.ed-badge:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--surface-raised), 0 0 0 4px var(--brand-400);
+}
+
+/* --- chevron ------------------------------------------------------------ */
+.ed-chev {
+  position: relative;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  color: var(--text-subtle);
+  transition: transform var(--dur-2) var(--ease-out),
+              color var(--dur-1) var(--ease-standard);
+  transform: rotate(0deg);
+}
+
+/* pure-CSS caret: pointing right when closed, down when open */
+.ed-chev::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 6px;
+  height: 6px;
+  margin: -4px 0 0 -4px;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: rotate(-45deg);
+}
+
+.ed-head:hover .ed-chev { color: var(--text); }
+
+.ed-section.is-open > .ed-head .ed-chev { transform: rotate(90deg); }
+
+/* --- section body ------------------------------------------------------- */
+.ed-body {
+  padding: var(--sp-3);
+  background: var(--surface-raised);
+}
+
+.ed-section:not(.is-open) > .ed-body { display: none; }
+
+
+/* =============================================================================
+ * 08 — FIELDS, LABELS, GRIDS
+ * ========================================================================== */
+.ed-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin: 0 0 var(--sp-3);
+}
+
+.ed-field:last-child { margin-bottom: 0; }
+
+.ed-label {
+  display: block;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.ed-hint {
+  margin: var(--sp-05) 0 0;
+  font-size: var(--fs-11);
+  line-height: var(--lh-snug);
+  color: var(--text-subtle);
+}
+
+.ed-hint b,
+.ed-hint strong { font-weight: var(--fw-semi); color: var(--text-muted); }
+
+.ed-hint code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-10);
+  padding: 0 3px;
+  border-radius: var(--r-xs);
+  background: var(--surface-sunken);
+}
+
+/* 2-column field grid */
+.ed-cols {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--sp-2) var(--sp-3);
+  align-items: start;
+  min-width: 0;
+}
+
+.ed-cols > * { min-width: 0; }
+
+/* narrow-rail collapse. 390px of *content* box ≈ a 422px rail. If container
+ * queries are unsupported the grid simply stays 2-up, which is still usable. */
+@container rail (max-width: 390px) {
+  .ed-cols { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* horizontal control cluster */
+.ed-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.ed-inline > .pt { flex: 1 1 auto; min-width: 90px; }
+.ed-inline > .ed-label { flex: 0 0 auto; }
+
+
+/* =============================================================================
+ * 09 — RICH-TEXT INPUTS (.rt — contenteditable, two-way bound)
+ * ========================================================================== */
+.rt {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: var(--sp-2) 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-input);
+  color: var(--text-strong);
+  font-family: var(--font-ui);
+  font-size: var(--fs-13);
+  line-height: var(--lh-base);
+  cursor: text;
+
+  /* Long unbroken strings (URLs, run-together words) must never widen the
+   * rail — the rail is a fixed grid column. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  -webkit-hyphens: auto;
+  hyphens: auto;
+
+  transition:
+    border-color var(--dur-1) var(--ease-standard),
+    background-color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+.rt:hover { border-color: var(--border-strong); }
+
+/* 2px navy ring via box-shadow (not outline) so the 6px radius is respected */
+.rt:focus,
+.rt.is-focused {
+  outline: none;
+  border-color: var(--brand);
+  background: var(--brand-50);
+  box-shadow: var(--field-ring);
+}
+
+/* single-line variant: Enter is suppressed by editor.js, so scroll sideways */
+.rt--single {
+  min-height: 32px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overflow-wrap: normal;
+  word-break: normal;
+  -webkit-hyphens: none;
+  hyphens: none;
+  scrollbar-width: thin;
+}
+
+.rt--single::-webkit-scrollbar { height: 6px; }
+
+/* multi-line fields cap their own height rather than the rail's */
+.rt--tall { min-height: 120px; }
+
+.rt[aria-disabled="true"],
+.rt.is-disabled {
+  background: var(--surface-sunken);
+  color: var(--text-subtle);
+  cursor: default;
+}
+
+/* placeholder */
+.rt:empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-faint);
+  font-style: italic;
+  pointer-events: none;
+}
+
+/* Firefox keeps a stray <br> in emptied contenteditables. */
+.rt.is-empty::before {
+  content: attr(data-placeholder);
+  color: var(--text-faint);
+  font-style: italic;
+  pointer-events: none;
+}
+
+/* --- pasted rich content ------------------------------------------------ */
+.rt > :first-child { margin-top: 0; }
+.rt > :last-child  { margin-bottom: 0; }
+
+.rt p {
+  margin: 0 0 0.55em;
+  line-height: var(--lh-base);
+}
+
+.rt p:last-child { margin-bottom: 0; }
+
+.rt ul,
+.rt ol {
+  margin: 0 0 0.55em;
+  padding-left: 1.35em;
+}
+
+.rt ul { list-style: disc outside; }
+.rt ol { list-style: decimal outside; }
+
+.rt li {
+  margin: 0 0 0.15em;
+  padding-left: 0.1em;
+  line-height: var(--lh-snug);
+}
+
+.rt li > ul,
+.rt li > ol { margin-top: 0.15em; margin-bottom: 0; }
+
+.rt b, .rt strong { font-weight: var(--fw-bold); }
+.rt i, .rt em     { font-style: italic; }
+.rt u             { text-underline-offset: 2px; }
+
+.rt a {
+  color: var(--brand-400);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.rt table {
+  border-collapse: collapse;
+  max-width: 100%;
+  font-size: inherit;
+}
+
+.rt td, .rt th {
+  padding: 1px 6px 1px 0;
+  vertical-align: top;
+  text-align: left;
+}
+
+.rt img { max-width: 100%; height: auto; }
+
+.rt hr {
+  height: 1px;
+  margin: var(--sp-2) 0;
+  border: 0;
+  background: var(--border);
+}
+
+
+/* =============================================================================
+ * 10 — PLAIN INPUTS (.pt) & CHECKBOX ROWS (.ed-check)
+ * ========================================================================== */
+.pt {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-input);
+  color: var(--text-strong);
+  font-size: var(--fs-13);
+  line-height: 1;
+  transition:
+    border-color var(--dur-1) var(--ease-standard),
+    background-color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+.pt:hover { border-color: var(--border-strong); }
+
+.pt:focus,
+.pt:focus-visible {
+  outline: none;
+  border-color: var(--brand);
+  background: var(--brand-50);
+  box-shadow: var(--field-ring);
+}
+
+.pt:disabled {
+  background: var(--surface-sunken);
+  color: var(--text-subtle);
+  cursor: default;
+}
+
+.pt::placeholder { color: var(--text-faint); }
+
+/* <select class="pt"> — same shell, custom caret */
+select.pt {
+  padding-right: 28px;
+  background-image: var(--chevron-img);
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+  background-size: 11px 11px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  text-overflow: ellipsis;
+}
+
+textarea.pt {
+  height: auto;
+  min-height: 64px;
+  padding: var(--sp-2) 10px;
+  line-height: var(--lh-base);
+  resize: vertical;
+}
+
+/* --- checkbox row ------------------------------------------------------- */
+.ed-check {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 30px;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-size: var(--fs-12);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color var(--dur-1) var(--ease-standard);
+}
+
+.ed-check:hover { background: var(--surface-hover); }
+
+.ed-check input[type="checkbox"],
+.ed-check input[type="radio"] {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+.ed-check input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.ed-check > span,
+.ed-check > label {
+  min-width: 0;
+  line-height: var(--lh-snug);
+  cursor: pointer;
+}
+
+
+/* =============================================================================
+ * 11 — EDITOR BUTTONS
+ * ========================================================================== */
+.ed-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  flex: 0 0 auto;
+  height: 28px;
+  min-width: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--sh-1);
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    border-color var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+.ed-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+
+.ed-btn:active {
+  background: var(--surface-active);
+  box-shadow: var(--sh-inset);
+}
+
+.ed-btn:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
+.ed-btn:disabled,
+.ed-btn[aria-disabled="true"] {
+  cursor: default;
+  opacity: 0.42;
+  box-shadow: none;
+  color: var(--text-faint);
+}
+
+.ed-btn[aria-pressed="true"] {
+  background: var(--brand-100);
+  border-color: var(--brand-300);
+  color: var(--brand-800);
+}
+
+.ed-btn--icon {
+  width: 28px;
+  min-width: 28px;
+  padding: 0;
+  font-size: var(--fs-12);
+  color: var(--text-muted);
+}
+
+.ed-btn--icon svg {
+  display: block;
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ed-btn--danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+.ed-btn--danger:hover {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger-strong);
+}
+
+.ed-btn--danger:focus-visible {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 2px var(--surface-raised), 0 0 0 4px var(--danger-border);
+}
+
+.ed-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+.ed-btn--ghost:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-subtle);
+  color: var(--text-strong);
+}
+
+.ed-btn--ghost:active { background: var(--surface-active); }
+
+.ed-btn--primary {
+  background: var(--brand);
+  border-color: var(--brand);
+  color: var(--text-invert);
+  font-weight: var(--fw-semi);
+}
+
+.ed-btn--primary:hover {
+  background: var(--brand-600);
+  border-color: var(--brand-600);
+  color: var(--text-invert);
+}
+
+/* --- dashed full-width "add" button ------------------------------------- */
+.ed-add {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  width: 100%;
+  min-height: 32px;
+  margin-top: var(--sp-2);
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    border-color var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard);
+}
+
+.ed-add:hover {
+  border-color: var(--brand-400);
+  border-style: solid;
+  background: var(--brand-50);
+  color: var(--brand-700);
+}
+
+.ed-add:active { background: var(--brand-100); }
+
+.ed-add:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  border-style: solid;
+  box-shadow: var(--focus-ring);
+}
+
+/* --- the "add a box" toolbar in the slips section ----------------------- */
+.ed-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+
+.ed-toolbar .ed-btn { flex: 1 1 auto; }
+.ed-toolbar .ed-btn--icon { flex: 0 0 auto; }
+
+.ed-toolbar-label {
+  flex: 0 0 auto;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+
+/* =============================================================================
+ * 12 — REPEATABLE PANELS
+ * ========================================================================== */
+.ed-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  min-width: 0;
+  margin: 0 0 var(--sp-2);
+}
+
+/* --- .ed-row : subtle inset panel for a repeatable row ------------------ */
+.ed-row {
+  min-width: 0;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  transition: border-color var(--dur-2) var(--ease-standard),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+
+.ed-row:hover { border-color: var(--border); }
+
+.ed-row.is-active,
+.ed-row.is-focus-within {
+  border-color: var(--brand-300);
+  box-shadow: 0 0 0 2px var(--brand-50);
+}
+
+.ed-row-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  margin-bottom: var(--sp-2);
+}
+
+.ed-row-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ed-row-tools {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* Tools stay quiet until the row is engaged, so a long list reads calm.
+ * They remain fully visible on keyboard focus. */
+.ed-row-tools .ed-btn {
+  opacity: 0.62;
+  transition: opacity var(--dur-2) var(--ease-standard),
+              background-color var(--dur-1) var(--ease-standard),
+              border-color var(--dur-1) var(--ease-standard);
+}
+
+.ed-row:hover .ed-row-tools .ed-btn,
+.ed-row-tools .ed-btn:hover,
+.ed-row-tools .ed-btn:focus-visible {
+  opacity: 1;
+}
+
+/* --- .ed-card : stronger panel, used by slips.js ------------------------ */
+.ed-card {
+  min-width: 0;
+  margin: 0 0 var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--sh-1);
+  overflow: hidden;
+  transition: border-color var(--dur-2) var(--ease-standard),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+
+.ed-card:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--sh-2);
+}
+
+.ed-card.is-active {
+  border-color: var(--brand-300);
+  box-shadow: var(--sh-2), 0 0 0 3px var(--brand-50);
+}
+
+.ed-card-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  min-height: 36px;
+  padding: var(--sp-1) var(--sp-2) var(--sp-1) var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-app);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semi);
+  color: var(--text-strong);
+}
+
+.ed-card-head > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ed-card-head .ed-row-tools,
+.ed-card-head .ed-inline { flex: 0 0 auto; }
+
+.ed-card-body {
+  padding: var(--sp-3);
+  min-width: 0;
+}
+
+.ed-card-body > :last-child { margin-bottom: 0; }
+
+/* type chip, e.g. "Lunch slip" / "Starburst" */
+.ed-chip {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 var(--sp-2);
+  border-radius: var(--r-pill);
+  background: var(--brand-100);
+  color: var(--brand-800);
+  font-size: var(--fs-10);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ed-chip--warn   { background: var(--warn-bg);   color: var(--warn-strong); }
+.ed-chip--ok     { background: var(--ok-bg);     color: var(--ok-strong); }
+.ed-chip--danger { background: var(--danger-bg); color: var(--danger-strong); }
+
+
+/* =============================================================================
+ * 13 — PREVIEW CANVAS
+ * -----------------------------------------------------------------------------
+ * Deep neutral, never pure black, with a gradient-only vignette plus a very
+ * faint 32px grid so the paper reads as sitting on a drafting surface.
+ * No images, no pseudo-element overlays that could intercept pointer events.
+ * ========================================================================== */
+#preview-pane {
+  position: relative;
+  z-index: var(--z-canvas);
+  grid-column: 3;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background-color: var(--canvas);
+  background-image:
+    /* vignette */
+    radial-gradient(120% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.05) 0%,
+      rgba(255, 255, 255, 0) 45%),
+    radial-gradient(140% 120% at 50% 55%,
+      rgba(0, 0, 0, 0) 40%,
+      rgba(0, 0, 0, 0.28) 100%),
+    /* 32px drafting grid */
+    repeating-linear-gradient(to right,
+      var(--canvas-grid) 0 1px, transparent 1px 32px),
+    repeating-linear-gradient(to bottom,
+      var(--canvas-grid) 0 1px, transparent 1px 32px),
+    linear-gradient(to bottom, var(--canvas-deep), var(--canvas));
+  color: var(--text-on-canvas);
+}
+
+#stage-viewport {
+  position: relative;
+  z-index: var(--z-stage);
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: var(--stage-pad);
+  /* `display:flex` + `margin:auto` on the child is the overflow-safe way to
+   * centre: unlike `justify-content:center`, it never clips the leading edge
+   * once the zoomed stage is larger than the viewport. */
+  display: flex;
+}
+
+/* JS (flip.js) owns width/height here — it sets pageW*k × pageH*k every
+ * relayout. Only centering and stacking context are declared. */
+#stage-sizer {
+  position: relative;
+  flex: 0 0 auto;
+  margin: auto;
+  /* All four sheets stay in layout at all times so fit.js can measure the
+   * inactive ones (SPEC 4). They are absolutely stacked, so whenever the
+   * active page's footprint is smaller than another's the hidden sheets poke
+   * out and give #stage-viewport a phantom scrollbar — which breaks the
+   * "whole page visible at once" requirement on the landscape calendar.
+   * Clipping here is safe: the turning leaf has backface-visibility:hidden so
+   * it is only visible through the first 90deg, and with perspective-origin at
+   * the left edge its projection stays inside the sheet's own box. */
+  overflow: hidden;
+}
+
+/* JS (flip.js) owns the transform. `perspective` is part of the book model
+ * from SPEC §5 and belongs to the chrome. */
+#page-stage {
+  position: relative;
+  transform-origin: top left;
+  perspective: 2200px;
+  -webkit-perspective: 2200px;
+  perspective-origin: 0% 50%;
+  will-change: transform;
+  /* Deliberately NO `filter` here: a filter on this element would flatten the
+   * 3D rendering context and kill the rotateY page turn. The sheet's own drop
+   * shadow belongs to paper.css — the --sh-paper-plate token is exposed in
+   * :root for it to consume. */
+}
+
+/* Empty-state / loading hint the integrator can drop into the canvas. */
+.stage-empty {
+  margin: auto;
+  padding: var(--sp-5);
+  color: var(--text-on-canvas);
+  font-size: var(--fs-13);
+  opacity: 0.7;
+  text-align: center;
+}
+
+
+/* =============================================================================
+ * 14 — THUMBNAIL RAIL  (a navigator, not a live render)
+ * ========================================================================== */
+#thumb-rail {
+  position: relative;
+  z-index: var(--z-thumbs);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Wide enough that adjacent .thumb-label captions (max-width 64px, centred
+   * on a 46px sheet) clear each other. */
+  gap: var(--sp-5);
+  height: var(--thumb-h);
+  min-height: var(--thumb-h);
+  padding: var(--sp-2) var(--sp-4) var(--sp-4);
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: rgba(0, 0, 0, 0.26);
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.thumb {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-end;
+  justify-content: center;
+  width: var(--thumb-w);
+  height: 58px;                      /* portrait 8.5 × 11 proportion */
+  padding: 0 0 3px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: var(--r-xs);
+  background:
+    linear-gradient(to bottom,
+      rgba(255, 255, 255, 0.92),
+      rgba(255, 255, 255, 0.74));
+  color: var(--n-700);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition:
+    transform var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-standard),
+    border-color var(--dur-2) var(--ease-standard),
+    background var(--dur-2) var(--ease-standard);
+}
+
+/* page 4 — landscape 11 × 8.5 */
+.thumb[data-orientation="landscape"] {
+  width: 75px;
+  height: 58px;
+}
+
+.thumb:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 255, 255, 0.42);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.42);
+  background: linear-gradient(to bottom, #fff, rgba(255, 255, 255, 0.86));
+}
+
+.thumb:active { transform: translateY(0); }
+
+.thumb:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--brand-300);
+}
+
+.thumb.is-active {
+  border-color: var(--brand-300);
+  box-shadow: 0 0 0 2px var(--brand-400), 0 4px 12px rgba(0, 0, 0, 0.42);
+  background: linear-gradient(to bottom, #fff, #f2f7fc);
+}
+
+/* The page name sits BELOW the sheet as an absolutely-positioned caption, so
+ * it never stretches the button's hit area or the sheet's 8.5x11 proportion.
+ * app.js supplies a short label here and the full page name in title/aria-label,
+ * so the max-width below should not normally truncate. */
+.thumb-label {
+  position: absolute;
+  top: calc(100% + 3px);
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 64px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-10);
+  line-height: 1;
+  font-weight: var(--fw-medium);
+  color: rgba(255, 255, 255, 0.58);
+  pointer-events: none;
+  transition: color var(--dur-2) var(--ease-standard);
+}
+
+.thumb:hover .thumb-label { color: rgba(255, 255, 255, 0.82); }
+
+.thumb.is-active .thumb-label {
+  color: #fff;
+  font-weight: var(--fw-semi);
+}
+
+.thumb-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: var(--r-xs);
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--n-600);
+  font-size: var(--fs-10);
+  font-weight: var(--fw-semi);
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.thumb.is-active .thumb-num {
+  background: var(--brand);
+  color: var(--text-invert);
+}
+
+/* Fold hint so a blank thumb still reads as a sheet of paper. */
+.thumb::before {
+  content: "";
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  right: 6px;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.10);
+}
+
+.thumb::after {
+  content: "";
+  position: absolute;
+  top: 11px;
+  left: 6px;
+  right: 14px;
+  height: 1px;
+  background: rgba(0, 0, 0, 0.07);
+}
+
+/* Give the rail room to disappear on very short windows. */
+@media (max-height: 620px) {
+  #thumb-rail { display: none; }
+}
+
+
+/* =============================================================================
+ * 15 — TOASTS
+ * ========================================================================== */
+#toasts {
+  position: fixed;
+  right: var(--sp-5);
+  bottom: var(--sp-5);
+  z-index: var(--z-toast);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--sp-2);
+  max-width: min(380px, calc(100vw - var(--sp-8)));
+  pointer-events: none;   /* the stack never blocks the canvas */
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  max-width: 100%;
+  padding: 10px var(--sp-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--n-400);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  color: var(--text-strong);
+  font-size: var(--fs-12);
+  line-height: var(--lh-snug);
+  box-shadow: var(--sh-4);
+  pointer-events: auto;
+  overflow-wrap: anywhere;
+  animation: toast-in var(--dur-3) var(--ease-out) both;
+}
+
+.toast--ok {
+  border-color: var(--ok-border);
+  border-left-color: var(--ok);
+  background: var(--ok-bg);
+  color: var(--ok-strong);
+}
+
+.toast--err {
+  border-color: var(--danger-border);
+  border-left-color: var(--danger);
+  background: var(--danger-bg);
+  color: var(--danger-strong);
+}
+
+.toast--warn {
+  border-color: var(--warn-border);
+  border-left-color: var(--warn);
+  background: var(--warn-bg);
+  color: var(--warn-strong);
+}
+
+.toast-title {
+  display: block;
+  font-weight: var(--fw-semi);
+}
+
+.toast-close {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  margin-left: auto;
+  border-radius: var(--r-sm);
+  color: inherit;
+  opacity: 0.55;
+  cursor: pointer;
+}
+
+.toast-close:hover { opacity: 1; background: rgba(0, 0, 0, 0.06); }
+
+.toast.is-leaving {
+  animation: toast-out var(--dur-2) var(--ease-standard) both;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translate3d(16px, 10px, 0) scale(0.97); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@keyframes toast-out {
+  from { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+  to   { opacity: 0; transform: translate3d(12px, 4px, 0) scale(0.98); }
+}
+
+
+/* =============================================================================
+ * 16 — UTILITIES
+ * ========================================================================== */
+.sr-only {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* Skip-link style focus reveal for anything using .sr-only as a skip target. */
+.sr-only-focusable:focus,
+.sr-only-focusable:focus-visible {
+  position: fixed !important;
+  top: var(--sp-2);
+  left: var(--sp-2);
+  z-index: var(--z-popover);
+  width: auto;
+  height: auto;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  clip: auto;
+  clip-path: none;
+  border-radius: var(--r-md);
+  background: var(--brand);
+  color: var(--text-invert);
+  box-shadow: var(--sh-3);
+}
+
+[hidden] { display: none !important; }
+
+.is-truncated {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.u-mt-0 { margin-top: 0 !important; }
+.u-mb-0 { margin-bottom: 0 !important; }
+
+
+/* =============================================================================
+ * 17 — REDUCED MOTION
+ * ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  :root {
+    --dur-1: 0ms;
+    --dur-2: 0ms;
+    --dur-3: 0ms;
+    --dur-4: 0ms;
+  }
+
+  #editor-scroll { scroll-behavior: auto; }
+
+  .ed-badge:hover,
+  .thumb:hover { transform: none; }
+}
+
+
+/* =============================================================================
+ * 18 — DARK SCHEME (CHROME ONLY)
+ * -----------------------------------------------------------------------------
+ * Only the semantic aliases are re-pointed, so every component above inherits
+ * the change. The preview canvas stays dark in both schemes; the paper itself
+ * is owned by paper.css and is always white — nothing here touches it.
+ * ========================================================================== */
+/* Theme is ALWAYS resolved to an explicit [data-theme] on <html> by the
+ * inline bootstrap in index.html, so these are attribute rules rather than
+ * a `prefers-color-scheme` media query — otherwise a user who picked Light
+ * on a dark OS would still get the dark palette. The system preference is
+ * only the initial DEFAULT, applied by that script. */
+:root[data-theme="dark"]{
+  color-scheme: dark;
+
+  /* --- surfaces ------------------------------------------------------- */
+  --surface-app:    #14181e;
+  --surface-rail:   #191e25;
+  --surface-bar:    #1c222a;
+  --surface-raised: #212832;
+  --surface-hover:  #2a323d;
+  --surface-active: #333c49;
+  --surface-sunken: #171c23;
+  --surface-input:  #1b212a;
+
+  /* canvas stays deliberately dark and near-identical to light mode so the
+   * white paper always sits on the same neutral field */
+  --canvas:       #22262c;
+  --canvas-deep:  #1a1e23;
+  --canvas-edge:  #12151a;
+  --canvas-grid:  rgba(255, 255, 255, 0.022);
+
+  /* --- text (AA on the surfaces above) -------------------------------- */
+  --text:        #dde3ea;
+  --text-strong: #f1f4f8;
+  --text-muted:  #a9b4c1;
+  --text-subtle: #8e9aa8;
+  --text-faint:  #6f7b89;
+  --text-invert: #0d1117;
+  --text-brand:  #8fbde4;
+  --text-on-canvas: #c8d0da;
+
+  /* --- borders -------------------------------------------------------- */
+  --border-subtle: #262e38;
+  --border:        #313a46;
+  --border-strong: #45505f;
+  --hairline:      #2a323d;
+
+  /* --- brand tints re-tuned for a dark field -------------------------- */
+  --brand:      #2b7ac0;   /* navy is too dark to read as interactive here */
+  --brand-900:  #0a2540;
+  --brand-800:  #0d3055;
+  --brand-700:  #113c69;
+  --brand-600:  #3a8ad0;
+  --brand-500:  #4d99da;
+  --brand-400:  #6fb0e6;
+  --brand-300:  #4a86b8;
+  --brand-200:  #2d5f8c;
+  --brand-100:  #1b3a58;
+  --brand-50:   #16283a;
+
+  /* --- status --------------------------------------------------------- */
+  --ok:            #56c288;
+  --ok-strong:     #8fe0b1;
+  --ok-bg:         #122a1e;
+  --ok-border:     #2c5c42;
+
+  --warn:          #dfa63f;
+  --warn-strong:   #f2cd86;
+  --warn-bg:       #2b2113;
+  --warn-border:   #5d4a22;
+
+  --danger:        #f0837a;
+  --danger-strong: #ffb3ac;
+  --danger-bg:     #2d1715;
+  --danger-border: #61302c;
+
+  /* --- focus ---------------------------------------------------------- */
+  --focus:           #6fb0e6;
+  --focus-ring:      0 0 0 2px var(--surface-raised), 0 0 0 4px #4d99da;
+  --focus-ring-flat: 0 0 0 3px #2d5f8c;
+  --field-ring:      0 0 0 2px #4d99da;
+
+  /* --- shadows: darker, tighter --------------------------------------- */
+  --sh-1: 0 1px 1px rgba(0, 0, 0, 0.30);
+  --sh-2: 0 1px 2px rgba(0, 0, 0, 0.34), 0 2px 6px rgba(0, 0, 0, 0.30);
+  --sh-3: 0 2px 4px rgba(0, 0, 0, 0.34), 0 6px 16px rgba(0, 0, 0, 0.38);
+  --sh-4: 0 8px 28px rgba(0, 0, 0, 0.52), 0 2px 6px rgba(0, 0, 0, 0.38);
+  --sh-bar: 0 1px 0 var(--hairline), 0 2px 10px rgba(0, 0, 0, 0.34);
+  --sh-inset: inset 0 1px 2px rgba(0, 0, 0, 0.40);
+
+  /* dark-mode select caret */
+  --chevron-img: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2.5 4.5 6 8l3.5-3.5' fill='none' stroke='%23a9b4c1' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* Save button: the raw navy loses contrast against a dark bar, so lift it. */
+[data-theme="dark"] .tb-btn--primary{
+  background: var(--brand);
+  border-color: var(--brand-600);
+  color: #06121f;
+}
+
+[data-theme="dark"] .tb-btn--primary:hover{
+  background: var(--brand-500);
+  border-color: var(--brand-500);
+  color: #06121f;
+}
+
+[data-theme="dark"] .tb-btn--primary:active{
+  background: var(--brand-300);
+  border-color: var(--brand-300);
+}
+
+[data-theme="dark"] .tb-logo{
+  background: linear-gradient(160deg, var(--brand-500), var(--brand-800));
+}
+
+[data-theme="dark"] .ed-badge{ color: #06121f; }
+
+/* Thumbnails: keep them light (they represent white sheets) but dim slightly
+ * so they don't glare on a dark chrome. */
+[data-theme="dark"] .thumb{
+  background: linear-gradient(to bottom,
+    rgba(236, 240, 245, 0.86), rgba(214, 221, 230, 0.74));
+  color: var(--n-800);
+}
+
+[data-theme="dark"] .thumb:hover{
+  background: linear-gradient(to bottom,
+    rgba(246, 249, 252, 0.94), rgba(226, 233, 241, 0.84));
+}
+
+[data-theme="dark"] .thumb.is-active{
+  background: linear-gradient(to bottom, #f4f8fc, #e2edf7);
+}
+
+[data-theme="dark"] .thumb-num{ background: rgba(0, 0, 0, 0.10); color: var(--n-700); }
+[data-theme="dark"] .thumb.is-active .thumb-num{ background: var(--brand-800); color: #eaf3fb; }
+
+[data-theme="dark"] #thumb-rail{ background: rgba(0, 0, 0, 0.34); }
+
+[data-theme="dark"] .toast-close:hover{ background: rgba(255, 255, 255, 0.10); }
+
+
+/* =============================================================================
+ * 19 — FORCED COLORS (Windows high-contrast)
+ * ========================================================================== */
+@media (forced-colors: active) {
+  .tb-btn,
+  .ed-btn,
+  .ed-add,
+  .pt,
+  .rt,
+  .thumb,
+  .toast,
+  .ed-section,
+  .ed-card {
+    border: 1px solid ButtonBorder;
+  }
+
+  .tb-btn[aria-pressed="true"],
+  .thumb.is-active {
+    border-color: Highlight;
+    outline: 2px solid Highlight;
+  }
+
+  .rt:focus,
+  .rt.is-focused,
+  .pt:focus {
+    outline: 2px solid Highlight;
+    outline-offset: 1px;
+  }
+
+  #rail-resizer { background: ButtonBorder; forced-color-adjust: none; }
+}
+
+
+/* =============================================================================
+ * 20 — MODULE-SUPPLIED EDITOR CHROME  (slips.js + calendar.js)
+ * -----------------------------------------------------------------------------
+ * slips.js `editorHTML()` and calendar.js `editorHTML()` emit editor-rail
+ * markup using the same `slip-*` / `cal-*` prefixes that paper.css uses for
+ * page 3 and page 4. To keep the two owners from colliding, EVERY selector in
+ * this section is scoped under `#editor-scroll`. That is structurally
+ * impossible to match inside `.paper` (which lives in #page-stage), so the
+ * boundary holds no matter what class names either module adds later.
+ *
+ * Everything below is built from the §01 tokens so the rail reads as one
+ * design system. Narrow-first: the base rules must survive a 300px rail
+ * (≈228px of usable width inside .ed-body), and the `rail` container query
+ * from §06 upgrades the layout when the user drags the rail wider.
+ *
+ * Verified against the emitted markup, not against docs/CLASSES.md — see the
+ * report notes for the places the two disagreed.
+ * ========================================================================== */
+
+/* -----------------------------------------------------------------------------
+ * 20.0  Shared correction: `.pt` on a checkbox
+ * -----------------------------------------------------------------------------
+ * slips.js emits `<input type="checkbox" class="pt">` inside `.slip-check`.
+ * The §10 `.pt` rule is written for text inputs and selects (block, 100% wide,
+ * 32px tall), which would blow a checkbox up into a grey slab. Restore native
+ * box metrics for the checkbox/radio case, scoped to the rail.
+ * -------------------------------------------------------------------------- */
+#editor-scroll input[type="checkbox"].pt,
+#editor-scroll input[type="radio"].pt {
+  -webkit-appearance: auto;
+  -moz-appearance: auto;
+  appearance: auto;
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  accent-color: var(--brand);
+  cursor: pointer;
+}
+
+#editor-scroll input[type="checkbox"].pt:focus,
+#editor-scroll input[type="radio"].pt:focus {
+  box-shadow: none;
+  background: none;
+}
+
+#editor-scroll input[type="checkbox"].pt:focus-visible,
+#editor-scroll input[type="radio"].pt:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+
+/* =============================================================================
+ * 20a — PAGE 3 SLIP EDITOR  (slips.js)
+ * ========================================================================== */
+#editor-scroll .slip-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* --- add-a-box toolbar -------------------------------------------------- */
+#editor-scroll .slip-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+
+#editor-scroll .slip-toolbar-label {
+  flex: 1 0 100%;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+#editor-scroll .slip-toolbar .slip-btn {
+  flex: 1 1 auto;
+  min-width: 96px;
+}
+
+/* --- the card list ------------------------------------------------------ */
+#editor-scroll .slip-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* Used twice: "no boxes yet" in .slip-list and "no option lines yet" in
+ * .slip-opts. One quiet dashed placeholder covers both. */
+#editor-scroll .slip-empty {
+  margin: 0;
+  padding: var(--sp-3) var(--sp-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--text-subtle);
+  font-size: var(--fs-12);
+  font-style: italic;
+  line-height: var(--lh-snug);
+  text-align: center;
+}
+
+/* --- one card per slip -------------------------------------------------- */
+#editor-scroll .slip-card {
+  display: block;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border-strong);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--sh-1);
+  overflow: hidden;
+  transition:
+    border-color var(--dur-2) var(--ease-standard),
+    box-shadow var(--dur-2) var(--ease-standard);
+}
+
+#editor-scroll .slip-card:hover {
+  box-shadow: var(--sh-2);
+}
+
+#editor-scroll .slip-card:focus-within,
+#editor-scroll .slip-card.is-active {
+  border-color: var(--brand-300);
+  box-shadow: var(--sh-2), 0 0 0 3px var(--brand-50);
+}
+
+/* Type is legible at a glance from the left accent alone. */
+#editor-scroll .slip-card--lunch     { border-left-color: var(--brand-400); }
+#editor-scroll .slip-card--custom    { border-left-color: var(--n-400); }
+#editor-scroll .slip-card--starburst { border-left-color: var(--warn); }
+
+#editor-scroll .slip-card--unknown {
+  border-left-color: var(--danger);
+  border-top-color: var(--danger-border);
+  border-right-color: var(--danger-border);
+  border-bottom-color: var(--danger-border);
+}
+
+/* --- card head : the reorder row --------------------------------------- */
+#editor-scroll .slip-card-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+  padding: var(--sp-2) var(--sp-2) var(--sp-2) var(--sp-1);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-app);
+}
+
+/* Grip glyph — a reorder affordance for the row that carries ↑/↓. Pointer
+ * feedback is opt-in: it only becomes `grab` if the integrator later marks the
+ * card draggable, so the cursor never promises an interaction that isn't
+ * wired. `.is-dragging` is pre-styled for the same reason. */
+#editor-scroll .slip-card-head::before {
+  content: "";
+  flex: 0 0 auto;
+  align-self: stretch;
+  width: 10px;
+  min-height: 18px;
+  background-image: radial-gradient(currentColor 1px, transparent 1.2px);
+  background-size: 4px 4px;
+  background-position: 1px center;
+  background-repeat: repeat-y;
+  color: var(--text-faint);
+  opacity: 0.75;
+}
+
+#editor-scroll .slip-card[draggable="true"] .slip-card-head { cursor: grab; }
+#editor-scroll .slip-card.is-dragging { opacity: 0.55; box-shadow: var(--sh-4); }
+#editor-scroll .slip-card.is-dragging .slip-card-head { cursor: grabbing; }
+
+#editor-scroll .slip-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-sm);
+  background: var(--brand-100);
+  color: var(--brand-800);
+  font-size: var(--fs-12);
+  line-height: 1;
+}
+
+#editor-scroll .slip-card--custom .slip-card-icon {
+  background: var(--surface-active);
+  color: var(--text-muted);
+}
+
+#editor-scroll .slip-card--starburst .slip-card-icon {
+  background: var(--warn-bg);
+  color: var(--warn-strong);
+}
+
+#editor-scroll .slip-card--unknown .slip-card-icon {
+  background: var(--danger-bg);
+  color: var(--danger-strong);
+}
+
+#editor-scroll .slip-card-title {
+  flex: 1 1 auto;      /* pushes .slip-card-pos / tools onto their own line */
+  min-width: 0;
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semi);
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#editor-scroll .slip-card-pos {
+  flex: 0 0 auto;
+  font-size: var(--fs-10);
+  font-weight: var(--fw-medium);
+  letter-spacing: 0.02em;
+  color: var(--text-subtle);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* Narrow rail: tools get their own full-width line, right-aligned. */
+#editor-scroll .slip-card-tools {
+  display: flex;
+  flex: 1 0 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+/* Wide rail: everything fits on one row. */
+@container rail (min-width: 430px) {
+  #editor-scroll .slip-card-tools {
+    flex: 0 0 auto;
+    flex-wrap: nowrap;
+  }
+}
+
+#editor-scroll .slip-card-body {
+  padding: var(--sp-3);
+  min-width: 0;
+}
+
+#editor-scroll .slip-card-body > :last-child { margin-bottom: 0; }
+
+/* --- unrecognised-type notice ------------------------------------------ */
+#editor-scroll .slip-warn {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn-border);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-strong);
+  font-size: var(--fs-12);
+  line-height: var(--lh-snug);
+}
+
+/* --- labelled field wrapper (a <label> element) ------------------------ */
+#editor-scroll .slip-f {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+  margin: 0 0 var(--sp-3);
+}
+
+#editor-scroll .slip-f:last-child { margin-bottom: 0; }
+
+#editor-scroll .slip-f-label {
+  display: block;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* the "Fixed height (optional)" row — label and control side by side */
+#editor-scroll .slip-f--inline {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px dashed var(--border-subtle);
+}
+
+#editor-scroll .slip-f--inline .slip-f-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-medium);
+  color: var(--text-subtle);
+}
+
+#editor-scroll .slip-height {
+  flex: 0 0 auto;
+  width: 130px;
+  height: 28px;
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- rich-text variants emitted for the three slip types --------------- */
+#editor-scroll .slip-rt--heading {
+  min-height: 52px;
+  font-weight: var(--fw-semi);
+  text-align: center;
+}
+
+#editor-scroll .slip-rt--body { min-height: 140px; }
+
+#editor-scroll .slip-rt--burst {
+  min-height: 64px;
+  font-weight: var(--fw-semi);
+  text-align: center;
+}
+
+/* --- checkbox cluster --------------------------------------------------- */
+#editor-scroll .slip-checks {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-3);
+  min-width: 0;
+  margin: 0 0 var(--sp-3);
+}
+
+#editor-scroll .slip-check {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 26px;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font-size: var(--fs-12);
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  transition: background-color var(--dur-1) var(--ease-standard);
+}
+
+#editor-scroll .slip-check:hover { background: var(--surface-hover); }
+
+#editor-scroll .slip-check > span {
+  min-width: 0;
+  line-height: var(--lh-snug);
+}
+
+/* --- option lines (lunch slips) ---------------------------------------- */
+#editor-scroll .slip-opts {
+  min-width: 0;
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+}
+
+#editor-scroll .slip-opts-head {
+  margin-bottom: var(--sp-2);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+/* Narrow-first: [kind][×] on row 1, the label field spanning row 2. */
+#editor-scroll .slip-opt {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px;
+  align-items: center;
+  gap: var(--sp-1) var(--sp-2);
+  min-width: 0;
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-raised);
+  transition: border-color var(--dur-2) var(--ease-standard),
+              box-shadow var(--dur-2) var(--ease-standard);
+}
+
+#editor-scroll .slip-opt:hover { border-color: var(--border); }
+
+#editor-scroll .slip-opt:focus-within {
+  border-color: var(--brand-300);
+  box-shadow: 0 0 0 2px var(--brand-50);
+}
+
+#editor-scroll .slip-opt-kind {
+  grid-column: 1;
+  height: 28px;
+  font-size: var(--fs-12);
+}
+
+#editor-scroll .slip-opt > .slip-btn { grid-column: 2; }
+
+#editor-scroll .slip-opt-label {
+  grid-column: 1 / -1;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: var(--fs-12);
+}
+
+#editor-scroll .slip-opt-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: var(--fs-10);
+  font-style: italic;
+  line-height: var(--lh-snug);
+  color: var(--text-subtle);
+}
+
+/* Wide rail: true 3-up grid. */
+@container rail (min-width: 430px) {
+  #editor-scroll .slip-opt {
+    grid-template-columns: minmax(92px, 0.9fr) minmax(0, 1.6fr) 26px;
+  }
+  #editor-scroll .slip-opt-label { grid-column: 2; }
+  #editor-scroll .slip-opt > .slip-btn { grid-column: 3; }
+  #editor-scroll .slip-opt-hint { grid-column: 1 / -1; }
+}
+
+/* --- buttons ------------------------------------------------------------ */
+#editor-scroll .slip-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-1);
+  flex: 0 0 auto;
+  height: 26px;
+  min-width: 26px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: var(--fs-12);
+  font-weight: var(--fw-medium);
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: var(--sh-1);
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    border-color var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+#editor-scroll .slip-btn:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+  color: var(--text-strong);
+}
+
+#editor-scroll .slip-btn:active {
+  background: var(--surface-active);
+  box-shadow: var(--sh-inset);
+}
+
+#editor-scroll .slip-btn:focus-visible {
+  outline: none;
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
+#editor-scroll .slip-btn[disabled],
+#editor-scroll .slip-btn:disabled {
+  cursor: default;
+  opacity: 0.38;
+  box-shadow: none;
+  background: var(--surface-raised);
+  border-color: var(--border-subtle);
+  color: var(--text-faint);
+}
+
+#editor-scroll .slip-btn[disabled]:hover,
+#editor-scroll .slip-btn:disabled:hover {
+  background: var(--surface-raised);
+  border-color: var(--border-subtle);
+  color: var(--text-faint);
+}
+
+#editor-scroll .slip-btn--icon {
+  width: 26px;
+  min-width: 26px;
+  padding: 0;
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+}
+
+#editor-scroll .slip-btn--danger {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+#editor-scroll .slip-btn--danger:hover {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger-strong);
+}
+
+#editor-scroll .slip-btn--danger:focus-visible {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 2px var(--surface-raised), 0 0 0 4px var(--danger-border);
+}
+
+#editor-scroll .slip-btn--ghost {
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+#editor-scroll .slip-btn--ghost:hover {
+  background: var(--surface-hover);
+  border-color: var(--border-subtle);
+  color: var(--text-strong);
+}
+
+#editor-scroll .slip-btn--ghost:active { background: var(--surface-active); }
+
+/* "+ Lunch Slip" / "+ Custom Box" / "+ Starburst" — matches .ed-add */
+#editor-scroll .slip-btn--add {
+  height: 30px;
+  border-style: dashed;
+  border-color: var(--border-strong);
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-muted);
+}
+
+#editor-scroll .slip-btn--add:hover {
+  border-style: solid;
+  border-color: var(--brand-400);
+  background: var(--brand-50);
+  color: var(--brand-700);
+}
+
+#editor-scroll .slip-btn--add:active { background: var(--brand-100); }
+
+#editor-scroll .slip-btn--add:focus-visible {
+  border-style: solid;
+  border-color: var(--focus);
+  box-shadow: var(--focus-ring);
+}
+
+/* --- left/right column segmented switch -------------------------------- */
+#editor-scroll .slip-colswitch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-raised);
+  box-shadow: var(--sh-1);
+  overflow: hidden;
+}
+
+#editor-scroll .slip-colswitch .slip-btn--toggle {
+  height: 24px;
+  min-width: 0;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: var(--text-subtle);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-medium);
+}
+
+#editor-scroll .slip-colswitch .slip-btn--toggle + .slip-btn--toggle {
+  border-left: 1px solid var(--border-subtle);
+}
+
+#editor-scroll .slip-colswitch .slip-btn--toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+#editor-scroll .slip-colswitch .slip-btn--toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+#editor-scroll .slip-colswitch .slip-btn--toggle.is-active,
+#editor-scroll .slip-colswitch .slip-btn--toggle[aria-pressed="true"] {
+  background: var(--brand);
+  color: var(--text-invert);
+  font-weight: var(--fw-semi);
+}
+
+#editor-scroll .slip-colswitch .slip-btn--toggle.is-active:hover,
+#editor-scroll .slip-colswitch .slip-btn--toggle[aria-pressed="true"]:hover {
+  background: var(--brand-600);
+  color: var(--text-invert);
+}
+
+
+/* =============================================================================
+ * 20b — PAGE 4 CALENDAR EDITOR  (calendar.js)
+ * ========================================================================== */
+#editor-scroll .cal-ed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+/* --- month / year selects ---------------------------------------------- */
+#editor-scroll .cal-ed-periods {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 96px);
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+#editor-scroll .cal-ed-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+/* Explicit placement so the two selects don't depend on source order. */
+#editor-scroll .cal-ed-field--month { grid-column: 1; }
+#editor-scroll .cal-ed-field--year  { grid-column: 2; }
+
+#editor-scroll .cal-ed-label {
+  display: block;
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+/* --- explanatory note (contains <strong> with the live month title) ----- */
+#editor-scroll .cal-ed-note {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--brand-100);
+  border-left: 3px solid var(--brand-300);
+  border-radius: var(--r-md);
+  background: var(--brand-50);
+  color: var(--text-muted);
+  font-size: var(--fs-11);
+  line-height: var(--lh-snug);
+}
+
+#editor-scroll .cal-ed-note strong {
+  font-weight: var(--fw-semi);
+  color: var(--text-brand);
+}
+
+/* --- grouped panels ---------------------------------------------------- */
+#editor-scroll .cal-ed-group {
+  min-width: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  overflow: hidden;
+}
+
+#editor-scroll .cal-ed-grouptitle {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--surface-app);
+  color: var(--text-subtle);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+}
+
+/* The group's own padding lives on the children so .cal-ed-grouptitle can run
+ * edge to edge. NB: `:first-of-type` would be wrong here — .cal-ed-grouptitle
+ * is also a <div>, so it owns "first of type". Use the adjacency instead. */
+#editor-scroll .cal-ed-group > .cal-ed-field {
+  padding: 0 var(--sp-3) var(--sp-3);
+}
+
+#editor-scroll .cal-ed-group > .cal-ed-grouptitle + .cal-ed-field {
+  padding-top: var(--sp-3);
+}
+
+#editor-scroll .cal-ed-rt { min-height: 34px; }
+
+/* --- the ~31 day rows -------------------------------------------------- */
+#editor-scroll .cal-ed-group--days { background: var(--surface-raised); }
+
+#editor-scroll .cal-ed-days {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--sp-2);
+}
+
+/* One line per day: [Mon 15] [events field]. Deliberately NOT a 2-column
+ * grid — at a 300px rail a 2-up layout leaves the field too narrow to read,
+ * and 31 stacked label-above-field pairs is twice the scroll distance. */
+#editor-scroll .cal-ed-day {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-2);
+  min-width: 0;
+  padding: 3px var(--sp-1);
+  border-radius: var(--r-sm);
+  transition: background-color var(--dur-1) var(--ease-standard);
+}
+
+/* Zebra banding — the single biggest scannability win in a 31-row list. */
+#editor-scroll .cal-ed-day:nth-child(even) {
+  background: var(--zebra);
+}
+
+#editor-scroll .cal-ed-day:hover { background: var(--surface-hover); }
+
+#editor-scroll .cal-ed-day:focus-within,
+#editor-scroll .cal-ed-day.is-active {
+  background: var(--brand-50);
+  box-shadow: inset 2px 0 0 var(--brand-400);
+}
+
+#editor-scroll .cal-ed-daylabel {
+  display: flex;
+  flex: 0 0 50px;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 4px;
+  padding-top: 7px;
+  min-width: 0;
+  cursor: default;
+}
+
+#editor-scroll .cal-ed-dayname {
+  flex: 0 0 auto;
+  font-size: var(--fs-10);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+#editor-scroll .cal-ed-daynum {
+  flex: 0 0 auto;
+  font-size: var(--fs-12);
+  font-weight: var(--fw-bold);
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+#editor-scroll .cal-ed-day:focus-within .cal-ed-daynum { color: var(--text-brand); }
+
+/* Compact multi-line field — calendar events are <br>-separated, so it must
+ * still wrap; only the resting height is tightened. */
+#editor-scroll .cal-ed-dayfield {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 30px;
+  padding: 5px 8px;
+  font-size: var(--fs-12);
+  line-height: var(--lh-snug);
+}
+
+/* A little more room for the day label once the rail is wide. */
+@container rail (min-width: 430px) {
+  #editor-scroll .cal-ed-daylabel { flex: 0 0 62px; }
+  #editor-scroll .cal-ed-dayname { font-size: var(--fs-11); }
+}
+
+
+/* =============================================================================
+ * 20c — SECTION 20 DARK RETUNE
+ * -----------------------------------------------------------------------------
+ * Almost everything above is token-driven and flips for free. Only the two
+ * hardcoded/derived surfaces need attention: the zebra band and the filled
+ * segmented-control state (which needs dark text on the lightened brand).
+ * ========================================================================== */
+:root { --zebra: rgba(16, 24, 40, 0.022); }
+
+/* Theme is ALWAYS resolved to an explicit [data-theme] on <html> by the
+ * inline bootstrap in index.html, so these are attribute rules rather than
+ * a `prefers-color-scheme` media query — otherwise a user who picked Light
+ * on a dark OS would still get the dark palette. The system preference is
+ * only the initial DEFAULT, applied by that script. */
+:root[data-theme="dark"]{ --zebra: rgba(255, 255, 255, 0.030); }
+
+[data-theme="dark"] #editor-scroll .slip-colswitch .slip-btn--toggle.is-active,
+[data-theme="dark"] #editor-scroll .slip-colswitch .slip-btn--toggle[aria-pressed="true"]{
+  background: var(--brand);
+  color: #06121f;
+}
+
+[data-theme="dark"] #editor-scroll .slip-colswitch .slip-btn--toggle.is-active:hover,
+[data-theme="dark"] #editor-scroll .slip-colswitch .slip-btn--toggle[aria-pressed="true"]:hover{
+  background: var(--brand-500);
+  color: #06121f;
+}
+
+[data-theme="dark"] #editor-scroll .slip-card-head::before{ opacity: 0.6; }
+
+[data-theme="dark"] #editor-scroll .cal-ed-note{ border-color: var(--brand-100); }
+
+
+/* =============================================================================
+ * 20d — SECTION 20 FORCED COLORS
+ * ========================================================================== */
+@media (forced-colors: active) {
+  #editor-scroll .slip-card,
+  #editor-scroll .slip-opt,
+  #editor-scroll .slip-btn,
+  #editor-scroll .slip-colswitch,
+  #editor-scroll .cal-ed-group {
+    border: 1px solid ButtonBorder;
+  }
+
+  #editor-scroll .slip-colswitch .slip-btn--toggle.is-active,
+  #editor-scroll .slip-colswitch .slip-btn--toggle[aria-pressed="true"] {
+    background: Highlight;
+    color: HighlightText;
+    forced-color-adjust: none;
+  }
+
+  #editor-scroll .cal-ed-day:nth-child(even) { background: Canvas; }
+}
+
+
+/* =============================================================================
+ * 21 — JUMP-TO-FIELD FLASH
+ * -----------------------------------------------------------------------------
+ * Set briefly by Keys.Editor.focusPath() when a click on the preview jumps to
+ * a field. Without it the jump is easy to miss: the rail may have scrolled a
+ * long way, and it may also have had to open a collapsed section, so the eye
+ * has no anchor for where it landed.
+ * ========================================================================== */
+@keyframes keys-jump-flash {
+  0%   { box-shadow: 0 0 0 2px var(--brand), 0 0 0 6px var(--brand-100); }
+  100% { box-shadow: 0 0 0 2px transparent, 0 0 0 6px transparent; }
+}
+
+.rt.is-jumped,
+.pt.is-jumped {
+  animation: keys-jump-flash 1200ms var(--ease-out) 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Hold a static ring instead of pulsing — the cue is still needed. */
+  .rt.is-jumped,
+  .pt.is-jumped {
+    animation: none;
+    box-shadow: 0 0 0 2px var(--brand);
+  }
+}
+
+
+/* =============================================================================
+ * 22 — THEME TOGGLE
+ * -----------------------------------------------------------------------------
+ * One button holding both icons; CSS picks which is visible from the resolved
+ * theme on <html>. Doing it in CSS rather than by swapping innerHTML in JS
+ * means the correct icon is painted on the very first frame, alongside the
+ * inline theme bootstrap in index.html — no flash of the wrong glyph.
+ *
+ * Convention: the icon shows the theme you would GET by pressing it.
+ * ========================================================================== */
+.tb-btn--theme .tb-ico-sun,
+.tb-btn--theme .tb-ico-moon {
+  display: none;
+}
+
+/* Light now -> offer dark (moon). Also covers the pre-bootstrap case where no
+ * data-theme has been written yet, so the button is never blank. */
+:root:not([data-theme="dark"]) .tb-btn--theme .tb-ico-moon { display: block; }
+
+/* Dark now -> offer light (sun). */
+:root[data-theme="dark"] .tb-btn--theme .tb-ico-sun { display: block; }
+
+/* A hair of rotation on press makes the swap feel deliberate rather than a
+ * glitch. Suppressed under reduced motion by section 17. */
+.tb-btn--theme:active .tb-ico-sun,
+.tb-btn--theme:active .tb-ico-moon {
+  transform: rotate(-18deg);
+}
+
+.tb-btn--theme .tb-ico-sun,
+.tb-btn--theme .tb-ico-moon {
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tb-btn--theme .tb-ico-sun,
+  .tb-btn--theme .tb-ico-moon {
+    transition: none;
+  }
+  .tb-btn--theme:active .tb-ico-sun,
+  .tb-btn--theme:active .tb-ico-moon {
+    transform: none;
+  }
+}
+
+
+/* =============================================================================
+ * 23 — AFTER SCHOOL SIGN UP EDITOR  (slips.js, type: afterschool)
+ * -----------------------------------------------------------------------------
+ * Scoped under #editor-scroll like section 20, so these `slip-*` names cannot
+ * collide with paper.css's preview rules of the same prefix.
+ *
+ * The point of this editor is that the author never aligns anything by hand:
+ * the weekday grid is a row of small columns, each with a heading field and a
+ * state dropdown, and the printed table does the alignment.
+ * ========================================================================== */
+
+/* --- rate / policy lines (two-column repeatable rows) --------------------- */
+#editor-scroll .slip-term {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: var(--sp-1) var(--sp-2);
+  align-items: start;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-app);
+  margin-bottom: var(--sp-2);
+}
+
+#editor-scroll .slip-term-label {
+  grid-column: 1;
+  min-height: 28px;
+}
+
+#editor-scroll .slip-term-value {
+  grid-column: 1 / -1;
+  min-height: 34px;
+}
+
+/* The delete button sits beside the label row, not below it. */
+#editor-scroll .slip-term > .slip-btn--danger {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* --- weekday grid --------------------------------------------------------- */
+/* auto-fit rather than a fixed 5 columns: the day list is data, and a rail
+ * narrowed to 300px cannot show five columns legibly. */
+#editor-scroll .slip-days-ed {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(84px, 1fr));
+  gap: var(--sp-2);
+}
+
+#editor-scroll .slip-day-ed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+#editor-scroll .slip-day-name {
+  min-height: 26px;
+  padding: var(--sp-05) var(--sp-1);
+  text-align: center;
+  font-weight: var(--fw-semi);
+  font-size: var(--fs-12);
+}
+
+/* Native selects have a minimum intrinsic width; without this the 84px track
+ * is blown out and the grid overflows the rail. */
+#editor-scroll .slip-day-state {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 var(--sp-4) 0 var(--sp-1);
+  font-size: var(--fs-11);
+  text-overflow: ellipsis;
+}
+
+/* --- sign-up line stepper ------------------------------------------------- */
+#editor-scroll .slip-stepper {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+#editor-scroll .slip-stepper-value {
+  min-width: 5.5em;
+  text-align: center;
+  font-size: var(--fs-12);
+  font-weight: var(--fw-medium);
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  padding: var(--sp-05) var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-sm);
+  background: var(--surface-app);
+}
+
+#editor-scroll .slip-opt-hint strong,
+#editor-scroll .slip-opt-hint em {
+  color: var(--text);
+  font-style: normal;
+  font-weight: var(--fw-semi);
+}
+
+/* --- dark retune ---------------------------------------------------------- */
+[data-theme="dark"] #editor-scroll .slip-term,
+[data-theme="dark"] #editor-scroll .slip-stepper-value {
+  background: var(--surface-sunken);
+}
