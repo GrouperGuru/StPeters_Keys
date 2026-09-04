@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>St. Peter's Keys - Rich Text Editor</title>
+    <style>
+        :root {
+            --primary-color: #003366;
+            --highlight-color: rgba(255, 235, 59, 0.4);
+            --bg-color: #f4f4f9;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            height: 100vh;
+            background-color: var(--bg-color);
+        }
+        
+        /* Layout */
+        #editor-pane {
+            width: 35%;
+            padding: 20px;
+            background: white;
+            box-shadow: 2px 0 5px rgba(0,0,0,0.1);
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            z-index: 10;
+            position: relative;
+        }
+        #preview-pane {
+            width: 65%;
+            padding: 20px;
+            background: #525659;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: space-between;
+            overflow-y: auto;
+        }
+        #page-wrapper {
+            flex-grow: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+
+        /* Editor Styles */
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        button.btn-main {
+            padding: 10px 15px;
+            cursor: pointer;
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            font-weight: bold;
+        }
+        button.btn-main:hover { background: #002244; }
+        
+        /* Formatting Toolbar */
+        #formatting-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 5px;
+            background: #e9ecef;
+            padding: 10px;
+            border-radius: 6px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            border: 1px solid #ccc;
+        }
+        .format-btn {
+            background: white;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-size: 1em;
+            font-weight: bold;
+        }
+        .format-btn:hover { background: #ddd; }
+        .format-select {
+            padding: 5px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .form-group { display: flex; flex-direction: column; gap: 5px; margin-bottom: 15px;}
+        .editor-section-title { background: #eee; padding: 5px; margin-top: 15px; font-weight: bold; }
+        label { font-weight: bold; font-size: 0.9em; color: #333; }
+        
+        /* Rich Text Input */
+        .rich-input {
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            min-height: 40px;
+            background: white;
+            font-family: inherit;
+            overflow-y: auto;
+        }
+        .rich-input:focus {
+            outline: 2px solid var(--primary-color);
+        }
+
+        /* Pagination Controls */
+        #pagination-controls {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            background: white;
+            padding: 10px 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+        #pagination-controls button {
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        #pagination-controls span { font-weight: bold; }
+
+        /* Preview Styles */
+        .page {
+            display: none;
+            width: 8.5in;
+            height: 11in;
+            background: white;
+            padding: 0.5in;
+            box-shadow: 0 0 10px rgba(0,0,0,0.5);
+            color: black;
+            box-sizing: border-box;
+            position: relative;
+            overflow: hidden;
+            flex-direction: column;
+        }
+        .page.active { display: flex; }
+        
+        .header {
+            text-align: center;
+            border-bottom: 3px solid var(--primary-color);
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .header h1 { margin: 0; font-size: 2.5em; letter-spacing: 2px; }
+        .header h2 { margin: 5px 0; font-size: 1.2em; font-weight: normal; }
+        .date-row {
+            display: flex;
+            justify-content: space-between;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        
+        .fixed-container {
+            overflow: hidden;
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+            width: 100%;
+        }
+        .fixed-container.highlight {
+            background-color: var(--highlight-color);
+            border-color: #fbc02d;
+            border-radius: 4px;
+        }
+        .preview-text {
+            white-space: pre-wrap;
+            margin: 0;
+            word-wrap: break-word;
+        }
+        
+        .content-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 20px; flex-grow: 1; }
+        .page-2-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; flex-grow: 1; }
+        .section-title {
+            background: var(--primary-color);
+            color: white;
+            padding: 5px 10px;
+            margin-top: 0;
+            font-size: 1.1em;
+            text-transform: uppercase;
+        }
+        .sidebar { font-size: 0.9em; }
+        .contact-info { font-size: 0.8em; margin-top: 20px; text-align: center; border-top: 1px solid #ccc; padding-top: 10px;}
+
+        /* Print CSS */
+        @media print {
+            body { background: white; display: block; height: auto; margin: 0; }
+            #editor-pane, #pagination-controls { display: none !important; }
+            #preview-pane { width: 100%; padding: 0; background: transparent; display: block; }
+            #page-wrapper { display: block; margin: 0; }
+            .page { 
+                display: flex !important; 
+                box-shadow: none; 
+                margin: 0; 
+                page-break-after: always; 
+                width: 100%;
+                height: 100vh;
+            }
+            .fixed-container.highlight { background-color: transparent; border-color: transparent; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Left Pane: Editor -->
+    <div id="editor-pane">
+        <div class="controls">
+            <button class="btn-main" onclick="saveData()">💾 Save</button>
+            <input type="file" id="load-file" style="display: none;" accept=".json" onchange="loadData(event)">
+            <button class="btn-main" onclick="document.getElementById('load-file').click()">📂 Load</button>
+            <button class="btn-main" onclick="window.print()">🖨️ PDF</button>
+        </div>
+
+        <!-- Formatting Toolbar -->
+        <div id="formatting-toolbar">
+            <button class="format-btn" onmousedown="event.preventDefault(); formatText('bold')" title="Bold"><b>B</b></button>
+            <button class="format-btn" onmousedown="event.preventDefault(); formatText('italic')" title="Italic"><i>I</i></button>
+            <button class="format-btn" onmousedown="event.preventDefault(); formatText('underline')" title="Underline"><u>U</u></button>
+            
+            <!-- Font Selection -->
+            <select class="format-select" onchange="formatText('fontName', this.value); this.selectedIndex = 0;">
+                <option value="" disabled selected>Font Style...</option>
+                <option value="Arial">Arial</option>
+                <option value="Georgia">Georgia</option>
+                <option value="Courier New">Courier New</option>
+                <option value="Times New Roman">Times New Roman</option>
+                <option value="Verdana">Verdana</option>
+                <option value="Impact">Impact</option>
+                <option value="Comic Sans MS">Comic Sans MS</option>
+                <option value="Trebuchet MS">Trebuchet MS</option>
+            </select>
+
+            <!-- Font Size Selection -->
+            <select class="format-select" onchange="formatText('fontSize', this.value); this.selectedIndex = 0;">
+                <option value="" disabled selected>Font Size...</option>
+                <option value="1">Smallest</option>
+                <option value="2">Small</option>
+                <option value="3">Normal</option>
+                <option value="4">Large</option>
+                <option value="5">Larger</option>
+                <option value="6">Huge</option>
+                <option value="7">Maximum</option>
+            </select>
+        </div>
+
+        <div class="editor-section-title">Page 1: Front Cover</div>
+        <div class="form-group">
+            <label>Newsletter Title</label>
+            <div class="rich-input" contenteditable="true" id="input-title" data-target="preview-title">ST. PETER'S KEYS</div>
+        </div>
+        <div class="form-group">
+            <label>Date</label>
+            <div class="rich-input" contenteditable="true" id="input-date" data-target="preview-date">September 8, 2025</div>
+        </div>
+        <div class="form-group">
+            <label>Verse / Quote</label>
+            <div class="rich-input" contenteditable="true" id="input-verse" data-target="preview-verse">Carry each other's burdens, and in this way you will fulfill the law of Christ. Galatians 6:2</div>
+        </div>
+        <div class="form-group">
+            <label>Main Article (Classroom Corner)</label>
+            <div class="rich-input" contenteditable="true" id="input-main" data-target="preview-main" style="min-height: 150px;">Our Chapel offering focus this year is to pray and believe as we care for our families...</div>
+        </div>
+        <div class="form-group">
+            <label>This Week Schedule</label>
+            <div class="rich-input" contenteditable="true" id="input-schedule" data-target="preview-schedule" style="min-height: 120px;">9/8 | Soccer Practice 3-5 pm<br>9/9 | Soccer Practice 3-5pm</div>
+        </div>
+
+        <div class="editor-section-title">Page 2: Announcements & Reminders</div>
+        <div class="form-group">
+            <label>General Announcements</label>
+            <div class="rich-input" contenteditable="true" id="input-announcements" data-target="preview-announcements" style="min-height: 120px;">CANDY BAR SALE<br>Our candy bar sale will begin in a few weeks...</div>
+        </div>
+        <div class="form-group">
+            <label>Safety & Lunch Reminders</label>
+            <div class="rich-input" contenteditable="true" id="input-safety" data-target="preview-safety" style="min-height: 120px;">SAFETY REMINDERS<br>In an effort to make sure everyone is safe...</div>
+        </div>
+        <div class="form-group">
+            <label>Lunch Forms / Orders</label>
+            <div class="rich-input" contenteditable="true" id="input-forms" data-target="preview-forms" style="min-height: 120px;">PIZZA LUNCH PREORDER<br>Due Tuesday, 9/9...</div>
+        </div>
+
+        <div class="editor-section-title">Page 3: Calendar Notes</div>
+        <div class="form-group">
+            <label>Calendar / Upcoming Events</label>
+            <div class="rich-input" contenteditable="true" id="input-calendar" data-target="preview-calendar" style="min-height: 150px;">SEPTEMBER 2025<br>9/14 - Back to School Sunday<br>9/15 - First Day of School</div>
+        </div>
+    </div>
+
+    <!-- Right Pane: Live Preview -->
+    <div id="preview-pane">
+        <div id="page-wrapper">
+            
+            <!-- PAGE 1 -->
+            <div class="page active" id="page-1">
+                <div class="header">
+                    <h2>QUALITY CHRISTIAN EDUCATION WITH THE MASTER'S TOUCH</h2>
+                    <div class="fixed-container" style="height: 50px;" id="container-title">
+                        <div id="preview-title" class="preview-text" style="font-weight:bold;"></div>
+                    </div>
+                    <div class="date-row">
+                        <span>PRAY AND BELIEVE!</span>
+                        <div class="fixed-container" style="height: 25px; width: auto;" id="container-date">
+                            <div id="preview-date" class="preview-text"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="content-grid">
+                    <div class="main-content">
+                        <h3 class="section-title">Classroom Corner</h3>
+                        <div class="fixed-container" style="height: 60px; margin-bottom: 10px;" id="container-verse">
+                            <div id="preview-verse" class="preview-text" style="font-style: italic;"></div>
+                        </div>
+                        <div class="fixed-container" style="height: 550px;" id="container-main">
+                            <div id="preview-main" class="preview-text"></div>
+                        </div>
+                    </div>
+                    <div class="sidebar">
+                        <h3 class="section-title">This Week</h3>
+                        <div class="fixed-container" style="height: 300px;" id="container-schedule">
+                            <div id="preview-schedule" class="preview-text"></div>
+                        </div>
+                        <div class="contact-info">
+                            <strong>St. Peter's Lutheran School</strong><br>6168 Walmore Road<br>Sanborn, New York 14132<br>Phone: 716-731-4422<br>discoverstpeters.org
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PAGE 2 -->
+            <div class="page" id="page-2">
+                <div class="page-2-grid">
+                    <div class="col-1">
+                        <h3 class="section-title">Announcements</h3>
+                        <div class="fixed-container" style="height: 400px; margin-bottom: 20px;" id="container-announcements">
+                            <div id="preview-announcements" class="preview-text"></div>
+                        </div>
+                        <h3 class="section-title">Safety & Lunch Info</h3>
+                        <div class="fixed-container" style="height: 400px;" id="container-safety">
+                            <div id="preview-safety" class="preview-text"></div>
+                        </div>
+                    </div>
+                    <div class="col-2">
+                        <h3 class="section-title">Forms & Sign-ups</h3>
+                        <div class="fixed-container" style="height: 800px;" id="container-forms">
+                            <div id="preview-forms" class="preview-text"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- PAGE 3 -->
+            <div class="page" id="page-3">
+                <h3 class="section-title" style="text-align: center;">Monthly Calendar / Upcoming</h3>
+                <div class="fixed-container" style="height: 850px; border: 1px solid #ccc; padding: 10px;" id="container-calendar">
+                    <div id="preview-calendar" class="preview-text"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pagination Controls -->
+        <div id="pagination-controls">
+            <button onclick="changePage(-1)">&#8592; Previous</button>
+            <span id="page-indicator">Page 1 of 3</span>
+            <button onclick="changePage(1)">Next &#8594;</button>
+        </div>
+
+    </div>
+
+    <script>
+        const inputs = document.querySelectorAll('.rich-input');
+        let currentPage = 1;
+        const totalPages = 3;
+
+        // --- Formatting & WYSIWYG ---
+        function formatText(command, value = null) {
+            document.execCommand(command, false, value);
+            
+            const activeElement = document.activeElement;
+            if (activeElement && activeElement.classList.contains('rich-input')) {
+                activeElement.dispatchEvent(new Event('input'));
+            }
+        }
+
+        // --- Pagination ---
+        function updatePagination() {
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.getElementById(`page-${currentPage}`).classList.add('active');
+            document.getElementById('page-indicator').textContent = `Page ${currentPage} of ${totalPages}`;
+        }
+        function changePage(delta) {
+            currentPage += delta;
+            if (currentPage < 1) currentPage = 1;
+            if (currentPage > totalPages) currentPage = totalPages;
+            updatePagination();
+        }
+        
+        // --- Auto-scale function ---
+        function autoScale(textElement, containerElement) {
+            const page = containerElement.closest('.page');
+            const wasHidden = !page.classList.contains('active');
+            
+            if (wasHidden) {
+                page.style.display = 'flex';
+                page.style.position = 'absolute';
+                page.style.visibility = 'hidden';
+            }
+
+            let fontSize = 16; 
+            if (textElement.id === 'preview-title') fontSize = 40; 
+            
+            textElement.style.fontSize = fontSize + 'px';
+            
+            while (textElement.scrollHeight > containerElement.clientHeight && fontSize > 8) {
+                fontSize -= 0.5;
+                textElement.style.fontSize = fontSize + 'px';
+            }
+
+            if (wasHidden) {
+                page.style.display = '';
+                page.style.position = '';
+                page.style.visibility = '';
+            }
+        }
+
+        // --- Event Listeners for Editor ---
+        inputs.forEach(input => {
+            const targetId = input.getAttribute('data-target');
+            const targetElement = document.getElementById(targetId);
+            const containerElement = document.getElementById(targetId.replace('preview-', 'container-'));
+
+            targetElement.innerHTML = input.innerHTML;
+            setTimeout(() => autoScale(targetElement, containerElement), 50);
+
+            input.addEventListener('input', (e) => {
+                targetElement.innerHTML = e.target.innerHTML;
+                autoScale(targetElement, containerElement);
+            });
+
+            input.addEventListener('focus', () => {
+                const parentPage = containerElement.closest('.page');
+                if (parentPage) {
+                    currentPage = parseInt(parentPage.id.split('-')[1]);
+                    updatePagination();
+                }
+                containerElement.classList.add('highlight');
+                setTimeout(() => {
+                    containerElement.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }, 50);
+            });
+
+            input.addEventListener('blur', () => {
+                containerElement.classList.remove('highlight');
+            });
+        });
+
+        // --- Save / Load Data ---
+        function saveData() {
+            const data = {};
+            inputs.forEach(input => data[input.id] = input.innerHTML);
+            const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `keys_newsletter_${new Date().toISOString().split('T')[0]}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
+
+        function loadData(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    inputs.forEach(input => {
+                        if (data[input.id] !== undefined) {
+                            input.innerHTML = data[input.id]; 
+                            input.dispatchEvent(new Event('input')); 
+                        }
+                    });
+                } catch (error) {
+                    alert("Error reading file.");
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = ''; 
+        }
+
+        window.addEventListener('resize', () => {
+            inputs.forEach(input => {
+                const targetId = input.getAttribute('data-target');
+                const targetElement = document.getElementById(targetId);
+                const containerElement = document.getElementById(targetId.replace('preview-', 'container-'));
+                autoScale(targetElement, containerElement);
+            });
+        });
+    </script>
+</body>
+</html>
