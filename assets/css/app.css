@@ -3659,3 +3659,292 @@ body.is-arranging * {
 @media (prefers-reduced-motion: reduce) {
   .dlg[open] { animation: none; }
 }
+
+
+/* =============================================================================
+ * 27 — SIGN-IN GATE (#auth-gate) & SETTINGS (#settings-dialog)
+ * -----------------------------------------------------------------------------
+ * The gate covers the whole viewport while #app is un-booted. It is chrome, so
+ * it uses the app tokens and follows the theme; the paper is not involved.
+ * ========================================================================== */
+
+body.is-locked { overflow: hidden; }
+body.is-locked #app { display: none; }
+
+#auth-gate {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;                 /* above every app layer, incl. the toolbar */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-5);
+  background:
+    radial-gradient(120% 90% at 50% 0%, var(--surface-app), var(--canvas-deep));
+  overflow: auto;
+}
+
+#auth-gate[hidden] { display: none; }
+
+.auth-card {
+  width: min(400px, 100%);
+  padding: var(--sp-6) var(--sp-5) var(--sp-5);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  box-shadow: var(--sh-4);
+}
+
+.auth-brand {
+  display: flex;
+  justify-content: center;
+  margin-bottom: var(--sp-3);
+}
+
+.auth-brand .tb-logo {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-md);
+}
+
+.auth-title {
+  margin: 0 0 var(--sp-2);
+  font-size: 17px;               /* one step above --fs-15; gate-only */
+  font-weight: var(--fw-semi);
+  text-align: center;
+  color: var(--text-strong);
+}
+
+.auth-lead {
+  margin: 0 0 var(--sp-4);
+  font-size: var(--fs-12);
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-bottom: var(--sp-3);
+}
+
+.auth-field[hidden] { display: none; }
+
+.auth-label {
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semi);
+  color: var(--text-muted);
+}
+
+.auth-input {
+  width: 100%;
+  height: 36px;
+  padding: 0 var(--sp-3);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-input);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: var(--fs-13);
+  box-shadow: var(--sh-inset);
+}
+
+.auth-input:focus {
+  outline: none;
+  border-color: var(--brand-400);
+  box-shadow: var(--field-ring);
+}
+
+.auth-hint,
+.auth-notice,
+.set-notice {
+  margin: 0;
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  color: var(--text-subtle);
+}
+
+.auth-notice,
+.set-notice {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Errors are announced, so they must be legible rather than decorative. */
+.auth-error {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-md);
+  background: var(--danger-bg);
+  color: var(--danger-strong);
+  font-size: var(--fs-12);
+  line-height: 1.45;
+}
+
+.auth-error[hidden] { display: none; }
+
+.auth-degraded {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-strong);
+  font-size: var(--fs-12);
+  line-height: 1.45;
+}
+
+.auth-degraded[hidden] { display: none; }
+
+.auth-submit {
+  width: 100%;
+  height: 38px;
+  margin-top: var(--sp-1);
+}
+
+.auth-submit[aria-busy="true"] { opacity: 0.6; cursor: progress; }
+
+
+/* --- settings ------------------------------------------------------------- */
+.dlg--wide { width: min(460px, calc(100vw - 2 * var(--sp-5))); }
+
+#settings-dialog .dlg-form { gap: 0; }
+
+.set-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+
+.set-section {
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.set-section:first-of-type { border-top: 0; padding-top: 0; }
+.set-section[hidden] { display: none; }
+
+.set-h {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-subtle);
+}
+
+.set-me {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.set-me-name {
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semi);
+  color: var(--text-strong);
+}
+
+.set-me-role {
+  flex: 1 1 auto;
+  font-size: var(--fs-11);
+  color: var(--text-subtle);
+}
+
+.set-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.set-label {
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  color: var(--text-muted);
+}
+
+.set-form .ed-btn { align-self: flex-start; }
+
+.set-users {
+  margin: 0 0 var(--sp-3);
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.set-user {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  min-height: 30px;
+  padding: var(--sp-1) var(--sp-2);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  font-size: var(--fs-12);
+}
+
+.set-user-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-strong);
+}
+
+.set-user-you { color: var(--text-subtle); font-weight: var(--fw-regular); }
+
+.set-user-role,
+.set-user-note {
+  flex: 0 0 auto;
+  font-size: var(--fs-11);
+  color: var(--text-subtle);
+}
+
+/* The last administrator has no remove button at all, rather than a disabled
+ * one: there is nothing the user can do to make it work, so offering it and
+ * then refusing would only be a puzzle. */
+.set-user-note {
+  padding: 1px var(--sp-2);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-pill);
+  cursor: help;
+}
+
+.set-msg {
+  margin: var(--sp-2) 0 0;
+  padding: var(--sp-2) var(--sp-3);
+  border-radius: var(--r-md);
+  font-size: var(--fs-12);
+  line-height: 1.45;
+}
+
+.set-msg[hidden] { display: none; }
+
+.set-msg--ok {
+  border: 1px solid var(--ok-border);
+  background: var(--ok-bg);
+  color: var(--ok-strong);
+}
+
+.set-msg--err {
+  border: 1px solid var(--danger-border);
+  background: var(--danger-bg);
+  color: var(--danger-strong);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-submit { transition: none; }
+}

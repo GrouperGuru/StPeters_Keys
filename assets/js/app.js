@@ -1340,9 +1340,19 @@
 
   Keys.App = App;
 
+  /* Keys.Auth owns the boot decision when it is loaded: it calls boot() once
+   * someone has signed in, so the newsletter is never rendered — never even
+   * built into the DOM — behind the gate. If auth.js is absent or failed to
+   * load, the app still comes up: a convenience lock must never be the reason
+   * the office cannot open its newsletter. */
+  function start() {
+    if (Keys.Auth && typeof Keys.Auth.start === 'function') Keys.Auth.start(boot);
+    else boot();
+  }
+
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', boot);
+    document.addEventListener('DOMContentLoaded', start);
   } else {
-    boot();
+    start();
   }
 })(window);

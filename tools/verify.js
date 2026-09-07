@@ -49,6 +49,46 @@ function section(title) {
 }
 
 /* ---------------------------------------------------------------------------
+ * Sign-in helper.
+ *
+ * auth.js holds app.js's boot back until someone signs in, so every fresh
+ * context — and every reload after localStorage is cleared — has to go through
+ * the gate before the rest of the suite has an app to test. This drives the
+ * REAL API rather than poking the session key directly: there is deliberately
+ * no test bypass in the shipped code, and a harness that installed one would
+ * stop the sign-in path from being exercised on every single run.
+ * ------------------------------------------------------------------------ */
+const HARNESS_USER = 'Verify Harness';
+const HARNESS_PW = 'verify-harness-passphrase';
+
+async function signIn(target) {
+  const state = await target.evaluate(() => {
+    const A = window.Keys && window.Keys.Auth;
+    if (!A) return { error: 'Keys.Auth did not load' };
+    if (A.currentUser()) return { already: true };
+    const gate = document.getElementById('auth-gate');
+    return { gateShown: !!gate && !gate.hidden, firstRun: !A.hasAccounts() };
+  });
+
+  if (state.error) throw new Error('harness sign-in: ' + state.error);
+  if (state.already) return 'already signed in';
+  if (!state.gateShown) return 'gate not shown';
+
+  await target.fill('#auth-name', HARNESS_USER);
+  await target.fill('#auth-password', HARNESS_PW);
+  if (state.firstRun) await target.fill('#auth-confirm', HARNESS_PW);
+  await target.click('#auth-submit');
+
+  // The gate boots the app on a successful submit; the sheets appearing is the
+  // signal that it finished.
+  await target.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 10000 });
+  await target.waitForTimeout(700);
+  return state.firstRun ? 'created the administrator' : 'signed in';
+}
+
+/* ---------------------------------------------------------------------------
  * In-page helper: WCAG contrast between an element's text and whatever is
  * actually painted behind it. Walks up for the first non-transparent
  * background, because most chrome elements paint nothing themselves.
@@ -192,6 +232,11 @@ async function main() {
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(900);
 
+  /* auth.js holds the boot back until someone signs in, so every check below
+   * runs against an app reached the way a real user reaches it. The gate is
+   * exercised in detail in its own section further down. */
+  await signIn(page);
+
   /* ---------------------------------------------------------------- boot -- */
   section('Boot');
   check('no uncaught page errors', pageErrors.length === 0, pageErrors.join('\n      '));
@@ -324,9 +369,12 @@ async function main() {
     keptOpen.stillOpen === true && keptOpen.others.length === 1,
     'open: ' + keptOpen.others.join(', '));
 
+  // Clearing localStorage takes the accounts with it, so this lands back on
+  // first-run setup.
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(900);
+  await signIn(page);
 
   /* ---------------------------------------------------------------- theme-- */
   section('Light / dark theme');
@@ -464,6 +512,7 @@ async function main() {
   const sysPage = await sysCtx.newPage();
   await sysPage.goto(URL, { waitUntil: 'load' });
   await sysPage.waitForTimeout(700);
+  await signIn(sysPage);
   const sysPick = await sysPage.evaluate(() => ({
     theme: document.documentElement.getAttribute('data-theme'),
     errors: 0
@@ -488,6 +537,7 @@ async function main() {
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(800);
+  await signIn(page);
 
   /* -------------------------------------------------- sticky rail headers -- */
   section('Section titles stay put while the rail scrolls');
@@ -1014,6 +1064,80 @@ async function main() {
     modernDom.articleDrops === 2,
     `railDrop=${modernDom.railDrop} railBlocks=${modernDom.railMovables} ` +
     `articleLists=${modernDom.articleDrops}`);
+
+  /* The masthead title is centred on the SHEET and the volume line is anchored
+   * to the right margin — independently of one another. As flex siblings the
+   * volume took width out of the row, so the title was centred on what was left
+   * and drifted left as the volume text grew. Measured across four very
+   * different volume lengths, because "looks centred" only held for one. */
+  const masthead = await page.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const S = window.Keys.State;
+    const cases = {
+      seeded: null,
+      empty: '',
+      tiny: 'V1',
+      long: 'Volume 12, Issue 34 &mdash; Winter Term 2026/2027',
+      absurd: 'Volume' + 'x'.repeat(160)
+    };
+    const out = {};
+    for (const name of Object.keys(cases)) {
+      if (cases[name] !== null) {
+        S.set('masthead.volume', cases[name]);
+        window.Keys.App.structuralChange(null);
+        await wait(400);
+      }
+      const paper = document.querySelector('#page-stage .paper[data-kind="front"]');
+      const flow = paper.querySelector('.paper-flow');
+      const title = paper.querySelector('.nl-title');
+      const vol = paper.querySelector('.nl-m-volume');
+      const cs = getComputedStyle(flow);
+      const fr = flow.getBoundingClientRect();
+      /* The printable content box, i.e. inside .paper-flow's page margins.
+       *
+       * #page-stage carries the zoom as a CSS transform, so getBoundingClientRect
+       * returns SCALED coordinates while getComputedStyle returns unscaled ones.
+       * Subtracting a raw padding from a scaled edge puts the margin in the
+       * wrong place by (1 - scale) × padding — about 7px at fit zoom, enough to
+       * look like a real layout bug. Recover the scale and convert. */
+      const scale = fr.width / flow.offsetWidth;
+      const cLeft = fr.left + parseFloat(cs.paddingLeft) * scale;
+      const cRight = fr.right - parseFloat(cs.paddingRight) * scale;
+      const tr = title.getBoundingClientRect();
+      const vr = vol.getBoundingClientRect();
+      out[name] = {
+        offCentre: Math.abs((tr.left + tr.right) / 2 - (cLeft + cRight) / 2),
+        volFlush: Math.abs(vr.right - cRight),
+        overlap: Math.max(0, tr.right - vr.left),
+        escapesRight: Math.max(0, vr.right - cRight),
+        hOver: flow.scrollWidth - flow.clientWidth
+      };
+    }
+    return out;
+  });
+
+  const mastCases = Object.keys(masthead);
+  check('the masthead title is centred on the sheet, whatever the volume line says',
+    mastCases.every(k => masthead[k].offCentre <= 1),
+    mastCases.map(k => `${k}=${masthead[k].offCentre.toFixed(1)}px`).join(' '));
+  check('the volume line is anchored flush to the right margin',
+    mastCases.every(k => masthead[k].volFlush <= 1),
+    mastCases.map(k => `${k}=${masthead[k].volFlush.toFixed(1)}px`).join(' '));
+  check('the volume never overlaps the title or runs past the margin',
+    mastCases.every(k => masthead[k].overlap <= 1 &&
+                         masthead[k].escapesRight <= 1 &&
+                         masthead[k].hOver <= 1),
+    mastCases.map(k =>
+      `${k}: overlap=${masthead[k].overlap.toFixed(1)} ` +
+      `past=${masthead[k].escapesRight.toFixed(1)}`).join(' | '));
+
+  await page.evaluate(async () => {
+    window.Keys.App.structuralChange(function () {
+      window.Keys.State.set('masthead.volume',
+        window.Keys.State.defaultDoc().masthead.volume);
+    });
+    await new Promise(r => setTimeout(r, 300));
+  });
 
   /* --- the editor rail follows the template ------------------------------ */
   section('Templates — the editor rail follows');
@@ -3231,6 +3355,507 @@ async function main() {
     'next-page navigation responded: ' + recovery.wired);
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
 
+  /* ------------------------------------------------------------ accounts --
+   * Runs in its OWN browser context: these checks create and delete accounts
+   * and sign out (which reloads), so they must not be able to disturb the
+   * state the rest of the suite left behind.
+   *
+   * The framing matters as much as the mechanics here. This gate is not an
+   * access-control boundary — there is no server — and the checks below are
+   * about the two things that ARE true and can be broken by accident:
+   * passwords are never recoverable from storage, and the rules the UI states
+   * are the rules the model actually applies.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — the gate');
+
+  const authCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+  const auth = await authCtx.newPage();
+  const authErrors = [];
+  auth.on('pageerror', e => authErrors.push(e.message));
+  await auth.goto(URL, { waitUntil: 'load' });
+  await auth.waitForTimeout(900);
+
+  const ADMIN_PW = 'first-admin-passphrase';
+  const USER_PW = 'ordinary-user-passphrase';
+
+  const locked = await auth.evaluate(() => {
+    const gate = document.getElementById('auth-gate');
+    return {
+      gateShown: !!gate && !gate.hidden,
+      bodyLocked: document.body.classList.contains('is-locked'),
+      appInert: document.getElementById('app').hasAttribute('inert'),
+      // The strongest form of "hidden": not rendered at all.
+      papers: document.querySelectorAll('#page-stage .paper').length,
+      railFields: document.querySelectorAll('#editor-scroll .rt').length,
+      // Nothing of the newsletter should be readable off the page.
+      bodyMentionsIssue: /Classroom Corner|Walmore/i.test(document.body.innerText),
+      title: document.getElementById('auth-title').textContent,
+      submit: document.getElementById('auth-submit').textContent,
+      confirmShown: !document.getElementById('auth-confirm-field').hidden,
+      hasAccounts: window.Keys.Auth.hasAccounts(),
+      notice: (document.querySelector('.auth-notice') || {}).textContent || ''
+    };
+  });
+
+  check('a first visit is met by the gate', locked.gateShown && locked.bodyLocked,
+    `gate=${locked.gateShown} locked=${locked.bodyLocked}`);
+  check('the newsletter is not rendered behind the gate, only hidden',
+    locked.papers === 0 && locked.railFields === 0 &&
+    locked.bodyMentionsIssue === false,
+    `papers=${locked.papers} fields=${locked.railFields} ` +
+    `text leak=${locked.bodyMentionsIssue}`);
+  check('the app behind it is inert, so nothing there is tabbable',
+    locked.appInert === true);
+  check('with no accounts it offers SETUP, not a sign-in',
+    locked.hasAccounts === false && /set up/i.test(locked.title) &&
+    /create/i.test(locked.submit) && locked.confirmShown === true,
+    `title="${locked.title}" submit="${locked.submit}"`);
+
+  /* A shipped default account is the classic own-goal. There must be none. */
+  check('the app ships with no built-in account and no default password',
+    locked.hasAccounts === false);
+
+  check('the gate says plainly that it is not a security barrier',
+    /not a security barrier/i.test(locked.notice) &&
+    /anyone who can open these files/i.test(locked.notice),
+    JSON.stringify(locked.notice.slice(0, 80)));
+
+  /* --- password validation --------------------------------------------- */
+  const rejects = await auth.evaluate(async pw => {
+    const A = window.Keys.Auth;
+    const out = {};
+    out.short = (await A.createFirstAdmin('Admin', 'short')).error || null;
+    out.blankName = (await A.createFirstAdmin('   ', pw)).error || null;
+    out.stillNone = A.hasAccounts();
+    return out;
+  }, ADMIN_PW);
+  check('a password under the minimum is refused',
+    /at least 8/i.test(rejects.short || ''), String(rejects.short));
+  check('a blank name is refused', /enter a name/i.test(rejects.blankName || ''),
+    String(rejects.blankName));
+  check('a refused attempt creates nothing', rejects.stillNone === false);
+
+  /* --- create the administrator through the real form ------------------- */
+  await auth.fill('#auth-name', 'Head Teacher');
+  await auth.fill('#auth-password', ADMIN_PW);
+  await auth.fill('#auth-confirm', ADMIN_PW);
+  await auth.click('#auth-submit');
+  await auth.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 10000 });
+  await auth.waitForTimeout(600);
+
+  const afterSetup = await auth.evaluate(() => ({
+    gateHidden: document.getElementById('auth-gate').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    me: window.Keys.Auth.currentUser(),
+    isAdmin: window.Keys.Auth.isAdmin()
+  }));
+  check('creating the administrator opens the newsletter',
+    afterSetup.gateHidden === true && afterSetup.papers === 4,
+    `hidden=${afterSetup.gateHidden} papers=${afterSetup.papers}`);
+  check('the first account is always an administrator',
+    afterSetup.me && afterSetup.me.name === 'Head Teacher' &&
+    afterSetup.me.role === 'admin' && afterSetup.isAdmin === true,
+    JSON.stringify(afterSetup.me));
+
+  /* --- how the password is stored --------------------------------------- */
+  section('Accounts — password storage');
+
+  const stored = await auth.evaluate(pw => {
+    const raw = localStorage.getItem(window.Keys.Auth.ACCOUNTS_KEY);
+    const parsed = JSON.parse(raw);
+    const u = parsed.users[0];
+    // Everything the browser is holding, in one string.
+    let all = '';
+    for (let i = 0; i < localStorage.length; i++) {
+      all += localStorage.key(i) + '=' + localStorage.getItem(localStorage.key(i)) + '\n';
+    }
+    for (let i = 0; i < sessionStorage.length; i++) {
+      all += sessionStorage.key(i) + '=' + sessionStorage.getItem(sessionStorage.key(i)) + '\n';
+    }
+    return {
+      keys: Object.keys(u).sort(),
+      iterations: u.iterations,
+      salt: u.salt,
+      saltBytes: atob(u.salt).length,
+      hashBytes: atob(u.hash).length,
+      plaintextAnywhere: all.indexOf(pw) !== -1,
+      // The public shape must never carry the secret material.
+      publicKeys: Object.keys(window.Keys.Auth.users()[0]).sort(),
+      sessionRaw: sessionStorage.getItem(window.Keys.Auth.SESSION_KEY)
+    };
+  }, ADMIN_PW);
+
+  check('the password is never stored, anywhere, in the clear',
+    stored.plaintextAnywhere === false);
+  check('it is stored as a salted PBKDF2 hash at the OWASP iteration floor',
+    stored.iterations >= 310000 && stored.saltBytes === 16 &&
+    stored.hashBytes === 32,
+    `iterations=${stored.iterations} salt=${stored.saltBytes}B hash=${stored.hashBytes}B`);
+  check('the stored record carries the parameters needed to verify it',
+    ['hash', 'iterations', 'salt'].every(k => stored.keys.indexOf(k) !== -1),
+    stored.keys.join(', '));
+  check('the public user list never exposes the salt or hash',
+    stored.publicKeys.indexOf('hash') === -1 &&
+    stored.publicKeys.indexOf('salt') === -1,
+    stored.publicKeys.join(', '));
+  check('the session holds only an id, not credentials',
+    !/hash|salt|passphrase/i.test(stored.sessionRaw || ''),
+    String(stored.sessionRaw));
+
+  /* --- sign in / sign out ----------------------------------------------- */
+  section('Accounts — signing in');
+
+  const signInChecks = await auth.evaluate(async ([name, pw]) => {
+    const A = window.Keys.Auth;
+    const out = {};
+    const t0 = performance.now();
+    out.wrongPassword = (await A.signIn(name, 'not-the-password')).error || null;
+    const t1 = performance.now();
+    out.unknownName = (await A.signIn('Nobody At All', pw)).error || null;
+    const t2 = performance.now();
+    out.wrongMs = t1 - t0;
+    out.unknownMs = t2 - t1;
+    const good = await A.signIn(name, pw);
+    out.correct = good.user ? good.user.name : ('ERROR: ' + good.error);
+    return out;
+  }, ['Head Teacher', ADMIN_PW]);
+
+  check('a wrong password is refused',
+    /do not match/i.test(signInChecks.wrongPassword || ''),
+    String(signInChecks.wrongPassword));
+  check('a correct password is accepted',
+    signInChecks.correct === 'Head Teacher', String(signInChecks.correct));
+  /* Same message AND comparable cost for both, so the reply cannot be used to
+   * work out who has an account. */
+  check('an unknown name is refused with the same message as a wrong password',
+    signInChecks.unknownName === signInChecks.wrongPassword,
+    `unknown="${signInChecks.unknownName}" wrong="${signInChecks.wrongPassword}"`);
+  check('an unknown name still costs a full derivation, so it cannot be timed',
+    signInChecks.unknownMs > signInChecks.wrongMs * 0.4,
+    `wrong=${signInChecks.wrongMs.toFixed(0)}ms unknown=${signInChecks.unknownMs.toFixed(0)}ms`);
+
+  // A reload keeps the session (same tab); a new context must not inherit it.
+  await auth.reload({ waitUntil: 'load' });
+  await auth.waitForTimeout(900);
+  const afterReload = await auth.evaluate(() => ({
+    me: window.Keys.Auth.currentUser(),
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    gateHidden: document.getElementById('auth-gate').hidden
+  }));
+  check('the session survives a reload of the same tab',
+    afterReload.me && afterReload.papers === 4 && afterReload.gateHidden,
+    JSON.stringify(afterReload.me));
+
+  const strangerCtx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
+  const stranger = await strangerCtx.newPage();
+  await stranger.goto(URL, { waitUntil: 'load' });
+  await stranger.waitForTimeout(800);
+  const strangerState = await stranger.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    me: window.Keys.Auth.currentUser()
+  }));
+  check('a different browser profile does not inherit the session',
+    strangerState.gateShown && strangerState.papers === 0 &&
+    strangerState.me === null,
+    JSON.stringify(strangerState));
+  await strangerCtx.close();
+
+  /* --- who may do what --------------------------------------------------- */
+  section('Accounts — administrator and users');
+
+  const asAdmin = await auth.evaluate(async pw => {
+    const A = window.Keys.Auth;
+    const out = {};
+    out.added = (await A.addUser('Office Assistant', pw, 'user')).user || null;
+    out.addedSecondAdmin = (await A.addUser('Deputy', pw, 'admin')).user || null;
+    out.duplicate = (await A.addUser('office assistant', pw, 'user')).error || null;
+    out.shortPw = (await A.addUser('Someone Else', 'abc', 'user')).error || null;
+    out.names = A.users().map(u => u.name + ':' + u.role);
+    return out;
+  }, USER_PW);
+
+  check('an administrator can add people',
+    asAdmin.added && asAdmin.added.role === 'user' &&
+    asAdmin.addedSecondAdmin && asAdmin.addedSecondAdmin.role === 'admin',
+    JSON.stringify(asAdmin.names));
+  check('a duplicate name is refused, ignoring case',
+    /already called/i.test(asAdmin.duplicate || ''), String(asAdmin.duplicate));
+  check('a short password is refused when adding someone too',
+    /at least 8/i.test(asAdmin.shortPw || ''), String(asAdmin.shortPw));
+
+  const asUser = await auth.evaluate(async ([userPw, adminName]) => {
+    const A = window.Keys.Auth;
+    const out = {};
+    await A.signIn('Office Assistant', userPw);
+    out.role = A.currentUser().role;
+    out.isAdmin = A.isAdmin();
+    out.addRefused = (await A.addUser('Sneaky', userPw, 'admin')).error || null;
+    const admin = A.users().filter(u => u.name === adminName)[0];
+    out.removeOtherRefused = A.removeUser(admin.id).error || null;
+    out.countAfter = A.users().length;
+    return out;
+  }, [USER_PW, 'Head Teacher']);
+
+  check('an ordinary user is not an administrator',
+    asUser.role === 'user' && asUser.isAdmin === false,
+    `role=${asUser.role}`);
+  check('an ordinary user cannot add people',
+    /only an administrator/i.test(asUser.addRefused || ''),
+    String(asUser.addRefused));
+  check('an ordinary user cannot remove anyone else',
+    /only an administrator/i.test(asUser.removeOtherRefused || ''),
+    String(asUser.removeOtherRefused));
+  check('a refused removal removes nobody', asUser.countAfter === 3,
+    'accounts=' + asUser.countAfter);
+
+  /* The settings panel must not merely refuse — it must not offer it. */
+  const userUi = await auth.evaluate(async () => {
+    window.Keys.Auth.openSettings();
+    await new Promise(r => setTimeout(r, 250));
+    const peopleHidden = document.getElementById('settings-people').hidden;
+    const removeButtons = document.querySelectorAll(
+      '#settings-user-list [data-auth="remove"]').length;
+    const notice = (document.querySelector('.set-notice') || {}).textContent || '';
+    const who = document.getElementById('settings-who').textContent;
+    const role = document.getElementById('settings-role').textContent;
+    window.Keys.Auth.closeSettings();
+    return { peopleHidden, removeButtons, notice, who, role };
+  });
+  check('a user is not offered the People section at all',
+    userUi.peopleHidden === true && userUi.removeButtons === 0,
+    `hidden=${userUi.peopleHidden} removeButtons=${userUi.removeButtons}`);
+  check('settings names who is signed in and their role',
+    userUi.who === 'Office Assistant' && userUi.role === 'User',
+    `${userUi.who} / ${userUi.role}`);
+  check('settings repeats the honest notice',
+    /not a security barrier/i.test(userUi.notice), userUi.notice.slice(0, 60));
+
+  /* --- deleting your own account ----------------------------------------- */
+  const selfDelete = await auth.evaluate(() => {
+    const A = window.Keys.Auth;
+    const me = A.currentUser();
+    const res = A.removeUser(me.id);
+    return {
+      removed: res.removed ? res.removed.name : null,
+      self: res.self,
+      error: res.error || null,
+      sessionAfter: A.currentUser(),
+      names: A.users().map(u => u.name)
+    };
+  });
+  check('a user can delete their own account',
+    selfDelete.removed === 'Office Assistant' && selfDelete.self === true &&
+    selfDelete.names.indexOf('Office Assistant') === -1,
+    JSON.stringify(selfDelete));
+  check('deleting your own account signs you out',
+    selfDelete.sessionAfter === null);
+
+  /* --- the last administrator ------------------------------------------- */
+  section('Accounts — the last administrator');
+
+  const lastAdmin = await auth.evaluate(async ([adminPw, adminName]) => {
+    const A = window.Keys.Auth;
+    const out = {};
+    await A.signIn(adminName, adminPw);
+
+    // Two admins exist, so removing one is allowed.
+    const deputy = A.users().filter(u => u.name === 'Deputy')[0];
+    out.removedDeputy = A.removeUser(deputy.id).removed ? true : false;
+    out.adminsLeft = A.users().filter(u => u.role === 'admin').length;
+
+    // Now the signed-in admin is the only one.
+    const me = A.currentUser();
+    out.selfRemoveRefused = A.removeUser(me.id).error || null;
+    out.stillThere = A.users().length;
+    out.stillSignedIn = !!A.currentUser();
+    return out;
+  }, [ADMIN_PW, 'Head Teacher']);
+
+  check('an administrator can be removed while another remains',
+    lastAdmin.removedDeputy === true && lastAdmin.adminsLeft === 1,
+    `adminsLeft=${lastAdmin.adminsLeft}`);
+  /* Without this guard an issue could end up with accounts but nobody able to
+   * manage them, and the only way out would be clearing browser storage —
+   * which throws the newsletter away with it. */
+  check('the last administrator cannot delete themselves',
+    /only administrator/i.test(lastAdmin.selfRemoveRefused || ''),
+    String(lastAdmin.selfRemoveRefused));
+  check('and is therefore still there', lastAdmin.stillThere === 1 &&
+    lastAdmin.stillSignedIn === true);
+
+  const lastAdminUi = await auth.evaluate(async () => {
+    window.Keys.Auth.openSettings();
+    await new Promise(r => setTimeout(r, 250));
+    const out = {
+      removeButtons: document.querySelectorAll(
+        '#settings-user-list [data-auth="remove"]').length,
+      note: (document.querySelector('.set-user-note') || {}).textContent || '',
+      deleteSelfDisabled: document.getElementById('settings-delete-self').disabled
+    };
+    window.Keys.Auth.closeSettings();
+    return out;
+  });
+  check('the UI offers no way to remove the last administrator',
+    lastAdminUi.removeButtons === 0 && /last admin/i.test(lastAdminUi.note) &&
+    lastAdminUi.deleteSelfDisabled === true,
+    JSON.stringify(lastAdminUi));
+
+  /* --- changing your password -------------------------------------------- */
+  section('Accounts — changing a password');
+
+  const pwChange = await auth.evaluate(async ([oldPw, newPw]) => {
+    const A = window.Keys.Auth;
+    const out = {};
+    out.wrongCurrent = (await A.changePassword('nope-not-it', newPw)).error || null;
+    out.tooShort = (await A.changePassword(oldPw, 'abc')).error || null;
+    out.changed = (await A.changePassword(oldPw, newPw)).changed || false;
+    out.oldRejected = (await A.signIn('Head Teacher', oldPw)).error || null;
+    const good = await A.signIn('Head Teacher', newPw);
+    out.newAccepted = !!good.user;
+    // A new salt on every change, so two passwords never share one.
+    const store = JSON.parse(localStorage.getItem(A.ACCOUNTS_KEY));
+    out.salt = store.users[0].salt;
+    return out;
+  }, [ADMIN_PW, 'a-brand-new-passphrase']);
+
+  check('changing a password requires the current one',
+    /not your current password/i.test(pwChange.wrongCurrent || ''),
+    String(pwChange.wrongCurrent));
+  check('the new password must still meet the minimum',
+    /at least 8/i.test(pwChange.tooShort || ''), String(pwChange.tooShort));
+  check('the password changes, and only the new one works afterwards',
+    pwChange.changed === true && pwChange.newAccepted === true &&
+    /do not match/i.test(pwChange.oldRejected || ''),
+    JSON.stringify(pwChange));
+  check('the salt is regenerated on change, not reused',
+    !!pwChange.salt && !!stored.salt && pwChange.salt !== stored.salt,
+    `before=${String(stored.salt).slice(0, 12)}… after=${String(pwChange.salt).slice(0, 12)}…`);
+
+  /* --- the toolbar gear -------------------------------------------------- */
+  section('Accounts — the settings button');
+
+  const gear = await auth.evaluate(() => {
+    const btn = document.querySelector('[data-act="settings"]');
+    const theme = document.querySelector('[data-act="theme"]');
+    if (!btn || !theme) return { missing: true };
+    const kids = [...btn.parentElement.children];
+    return {
+      inToolbar: !!btn.closest('#toolbar'),
+      sameGroupAsTheme: btn.parentElement === theme.parentElement,
+      adjacent: Math.abs(kids.indexOf(btn) - kids.indexOf(theme)) === 1,
+      hasIcon: !!btn.querySelector('svg'),
+      label: btn.getAttribute('aria-label') || '',
+      titled: (btn.getAttribute('title') || '').length > 0
+    };
+  });
+  check('there is a gear button in the toolbar', !gear.missing && gear.inToolbar &&
+    gear.hasIcon, JSON.stringify(gear));
+  check('it sits directly beside the light/dark theme button',
+    gear.sameGroupAsTheme === true && gear.adjacent === true,
+    `sameGroup=${gear.sameGroupAsTheme} adjacent=${gear.adjacent}`);
+  check('its label names who is signed in',
+    /signed in as/i.test(gear.label) && /administrator/i.test(gear.label),
+    gear.label);
+
+  const gearOpens = await auth.evaluate(async () => {
+    document.querySelector('[data-act="settings"]').click();
+    await new Promise(r => setTimeout(r, 300));
+    const dlg = document.getElementById('settings-dialog');
+    const open = dlg.open;
+    const modal = dlg.matches(':modal');
+    window.Keys.Auth.closeSettings();
+    await new Promise(r => setTimeout(r, 200));
+    return { open, modal, closed: !dlg.open };
+  });
+  check('clicking the gear opens settings as a modal, and it closes again',
+    gearOpens.open && gearOpens.modal && gearOpens.closed,
+    JSON.stringify(gearOpens));
+
+  /* --- signing out -------------------------------------------------------- */
+  const signedOut = await auth.evaluate(() => {
+    window.Keys.Auth.signOut();
+    return {
+      me: window.Keys.Auth.currentUser(),
+      session: sessionStorage.getItem(window.Keys.Auth.SESSION_KEY)
+    };
+  });
+  check('signing out clears the session',
+    signedOut.me === null && signedOut.session === null,
+    JSON.stringify(signedOut));
+
+  await auth.reload({ waitUntil: 'load' });
+  await auth.waitForTimeout(900);
+  const afterSignOut = await auth.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    // Accounts survive; only the session went.
+    hasAccounts: window.Keys.Auth.hasAccounts(),
+    title: document.getElementById('auth-title').textContent,
+    confirmShown: !document.getElementById('auth-confirm-field').hidden
+  }));
+  check('after signing out the gate returns and the newsletter is not rendered',
+    afterSignOut.gateShown && afterSignOut.papers === 0,
+    JSON.stringify(afterSignOut));
+  check('it now asks to SIGN IN rather than to set up',
+    afterSignOut.hasAccounts === true && /sign in/i.test(afterSignOut.title) &&
+    afterSignOut.confirmShown === false,
+    `title="${afterSignOut.title}"`);
+
+  /* --- a corrupt account store ------------------------------------------- */
+  section('Accounts — corrupt or hostile storage');
+
+  const corrupt = await auth.evaluate(async () => {
+    const A = window.Keys.Auth;
+    const out = {};
+    const set = v => localStorage.setItem(A.ACCOUNTS_KEY, v);
+
+    set('{ not json at all');
+    out.badJson = A.users().length;
+
+    set(JSON.stringify({ version: 1, users: 'not-a-list' }));
+    out.notAList = A.users().length;
+
+    // Records missing the material needed to verify a password are dropped
+    // rather than trusted — a record with no hash must never let anyone in.
+    set(JSON.stringify({ version: 1, users: [
+      { id: 'x', name: 'No Hash', role: 'admin' },
+      { id: 'y', name: 'Bad Role', role: 'superuser', salt: 'AA==', hash: 'AA==', iterations: 1 },
+      { id: 'z', name: 'Zero Iters', role: 'admin', salt: 'AA==', hash: 'AA==', iterations: 0 }
+    ] }));
+    out.partial = A.users().length;
+    out.signInWithNoHash = (await A.signIn('No Hash', '')).error || null;
+
+    localStorage.removeItem(A.ACCOUNTS_KEY);
+    return out;
+  });
+  check('unparseable account storage is treated as no accounts, not a crash',
+    corrupt.badJson === 0 && corrupt.notAList === 0,
+    `badJson=${corrupt.badJson} notAList=${corrupt.notAList}`);
+  check('records without usable hash material are discarded',
+    corrupt.partial === 0, 'kept ' + corrupt.partial);
+  check('a record with no hash cannot be signed into',
+    /do not match/i.test(corrupt.signInWithNoHash || ''),
+    String(corrupt.signInWithNoHash));
+
+  await auth.reload({ waitUntil: 'load' });
+  await auth.waitForTimeout(900);
+  const afterWipe = await auth.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    firstRun: !window.Keys.Auth.hasAccounts(),
+    title: document.getElementById('auth-title').textContent
+  }));
+  check('losing the accounts falls back to setup, never to an open door',
+    afterWipe.gateShown && afterWipe.firstRun && /set up/i.test(afterWipe.title),
+    JSON.stringify(afterWipe));
+
+  check('no uncaught errors anywhere in the accounts flow',
+    authErrors.length === 0, authErrors.slice(0, 4).join(' | '));
+
+  await authCtx.close();
+
   /* ---------------------------------------------------------------- shots--
    * Screenshots and the PDF must show a PRISTINE document. The tests above
    * deliberately mutate state (including loading a legacy v1 file), and the
@@ -3245,6 +3870,7 @@ async function main() {
     clean.on('pageerror', e => cleanErrors.push(e.message));
     await clean.goto(URL, { waitUntil: 'load' });
     await clean.waitForTimeout(900);
+    await signIn(clean);
 
     const seeded = await clean.evaluate(() => ({
       title: (document.querySelector('#page-stage [data-bind="masthead.title"]') || {}).textContent,

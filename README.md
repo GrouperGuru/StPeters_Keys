@@ -5,6 +5,38 @@ A web-based newsletter generator for St. Peter's Lutheran School.
 Open `index.html` in a browser. There is no build step, no install, and no
 network access — it runs straight from disk.
 
+## Signing in
+
+The first time you open it, the app asks you to create the **administrator**
+account — there is no built-in account and no default password. After that,
+everyone signs in by name and password.
+
+- The **administrator** can add and remove people, from **Settings → People**.
+- **Anyone** can change their own password or delete their own account.
+- The **last administrator** can't be removed, by themselves or anyone else —
+  otherwise nobody would be able to manage accounts again.
+
+Deleting an account never deletes the newsletter. Signing out clears the
+session; closing the tab does too.
+
+> ### What this does and doesn't protect
+>
+> This app is static files opened straight from disk. **There is no server, so
+> the sign-in is not a security barrier.** It keeps the newsletter out of the
+> way of whoever wanders up to a shared office computer, and records who is
+> working on the issue. It cannot stop anyone who has the files: they can open
+> the browser's developer tools, edit `assets/js/auth.js`, or read the saved
+> `.json` directly.
+>
+> **So please don't keep anything confidential in the newsletter.**
+>
+> Passwords themselves are handled properly — hashed with PBKDF2-SHA256, a
+> random salt per person and 310,000 iterations — so a password you also use
+> elsewhere isn't given away by a glance at browser storage. That is a real
+> protection; the login as a whole is not.
+>
+> Real access control would need a server. See `docs/SPEC.md` §12.
+
 ## Using it
 
 The window is split in two: the editing rail on the left, the live paper
@@ -12,8 +44,8 @@ preview on the right. Everything you type appears on the page immediately.
 
 **The toolbar** across the top holds everything: **Save**, **Load** and **PDF**,
 the text formatting controls (bold, italic, underline, font, size, alignment,
-bullets), the **template** dropdown, the light/dark theme button, the zoom
-control, and the page arrows.
+bullets), the **template** dropdown, the **settings** gear, the light/dark theme
+button, the zoom control, and the page arrows.
 
 The editing rail opens as a collapsed list of the four pages, so you start with
 an overview rather than a wall of fields. Click a page's header to open it.
@@ -63,8 +95,9 @@ and it has to print.
 | Bold / italic / underline | `Ctrl`/`Cmd` + `B` / `I` / `U` |
 | Previous / next page | `Alt` + `←` / `→` |
 
-Two things are remembered between visits, separately from the newsletter
-itself: your theme choice, and a working copy of the current issue.
+Three things are remembered between visits, separately from the newsletter
+itself: your theme choice, the accounts, and a working copy of the current
+issue. Your sign-in is remembered only until you close the tab.
 
 The two panes are linked both ways:
 
@@ -169,6 +202,7 @@ assets/js/slips.js      page 3
 assets/js/arrange.js    drag-to-reorder sections, with the overflow guard
 assets/js/render.js     builds the preview pages
 assets/js/editor.js     builds the editing rail
+assets/js/auth.js       accounts, the sign-in gate, the Settings panel
 assets/js/app.js        bootstrap and event wiring
 docs/SPEC.md            module contract — read before changing anything
 docs/CLASSES.md         CSS class contract for the paper

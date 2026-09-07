@@ -113,9 +113,9 @@ Modern face stacks, declared on `.paper[data-template="modern"]`:
 |---|---|
 | `.paper-flow` | **flex column**, padding `0.36in 0.4in 0.26in`; children `flex: 0 0 auto` (see the note below) |
 | `.nl-m-head` | `border-bottom: 3px solid #000` — the thick half of the reference's double rule |
-| `.nl-m-titlerow` | flex, `align-items: baseline`, centred; title + volume share a baseline |
-| `.nl-title` | display face **700**, ~4.6em, `text-transform: none` (Modern prints the title as typed) |
-| `.nl-m-volume` | ~0.86em, right-aligned, `max-width: 34%`, `overflow-wrap: anywhere`. **Never `white-space: nowrap`** |
+| `.nl-m-titlerow` | grid `minmax(0,1fr) auto minmax(0,1fr)`, `align-items: baseline`. **Not a centred flex row** — see the note below |
+| `.nl-title` | `grid-column: 2`; display face **700**, ~4.6em, `text-transform: none` (Modern prints the title as typed) |
+| `.nl-m-volume` | `grid-column: 3`, `justify-self: end`, `align-self: end`; ~0.86em, `min-width: 0`, `overflow-wrap: anywhere`. **Never `white-space: nowrap`** |
 | `.nl-m-dateband` | 1.5px rules top and bottom — the thin half of the double rule, plus the band under the date |
 | `.nl-date` | display face **400** (light, not bold), ~4.05em, centred, uppercase |
 | `.nl-tagline` | display face 700, ~1.42em, centred, uppercase, **not italic**, `border-bottom: 1.5px` |
@@ -138,7 +138,17 @@ Modern face stacks, declared on `.paper[data-template="modern"]`:
 | `.nl-m-foot-site` | `grid-column: 2`, centred on the **sheet** |
 | `.nl-m-foot-num` | `grid-column: 3`, `justify-self: end`, tabular numerals |
 
-Three rules here are load-bearing for the overflow guarantee, not cosmetic:
+**The masthead row is a three-track grid, not a centred flex row.** As flex
+siblings the volume line took width out of the row, so the title was centred on
+whatever was left of it and sat visibly left of the sheet's centre — and drifted
+as the volume text changed length. The empty first track mirrors the volume's
+track, so the title is centred on the *sheet* and the volume is anchored to the
+right margin, independently of each other. Both side tracks must be
+`minmax(0, 1fr)`, never a plain `1fr`: `1fr` floors at its content's min-content
+width, which lets a long volume string widen its own track and push the title
+off centre again. The same device is used for `.nl-m-foot`, for the same reason.
+
+Three more rules here are load-bearing for the overflow guarantee, not cosmetic:
 
 - **`.paper-flow` children are `flex: 0 0 auto`.** A shrinkable flex item
   absorbs an overflow instead of showing it, and tier 2 only shrinks the page

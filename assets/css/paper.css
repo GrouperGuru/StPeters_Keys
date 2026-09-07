@@ -604,11 +604,22 @@
   padding-bottom: 0.04in;
 }
 
+/* Three tracks, not a centred flex row.
+ *
+ * As flex siblings the volume line took width out of the row, so the title was
+ * centred on "whatever was left" and sat visibly left of the sheet's centre —
+ * and it drifted as the volume text changed length. An empty first track
+ * mirrors the volume's track exactly, so the title is centred on the SHEET and
+ * the volume is anchored to the right edge, independently of each other.
+ *
+ * Both side tracks are minmax(0, 1fr) rather than 1fr: a plain 1fr floors at
+ * its content's min-content width, which would let a long volume string widen
+ * its track and push the title off centre again — the very thing this fixes. */
 .paper[data-template="modern"][data-kind="front"] .nl-m-titlerow {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: baseline;
-  justify-content: center;
-  gap: 0.12in;
+  column-gap: 0.12in;
   min-width: 0;
 }
 
@@ -621,7 +632,7 @@
   text-align: center;
   text-transform: none;          /* Modern prints the title in mixed case */
   margin: 0;
-  flex: 0 1 auto;
+  grid-column: 2;                /* the middle track — centred on the sheet */
   min-width: 0;
 }
 
@@ -635,10 +646,13 @@
   font-size: 0.86em;             /* ≈9pt */
   line-height: 1.2;
   text-align: right;
-  flex: 0 1 auto;
+  grid-column: 3;                /* the right track */
+  justify-self: end;             /* flush with the trim-side margin */
+  align-self: end;               /* sits down on the title's baseline */
+  /* Grid items floor at min-content unless told otherwise. Without both of
+   * these a long value would widen its track and re-break the centring. */
   min-width: 0;
-  max-width: 34%;
-  align-self: flex-end;
+  max-width: 100%;
   padding-bottom: 0.03in;
   overflow-wrap: anywhere;
 }

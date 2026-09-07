@@ -13,9 +13,10 @@ depend on them by string.
   ships in-repo.
 - Every module attaches itself to the `window.Keys` namespace:
   `Keys.State`, `Keys.Fit`, `Keys.Flip`, `Keys.Calendar`, `Keys.Slips`,
-  `Keys.Arrange`, `Keys.Render`, `Keys.Editor`, `Keys.App`.
+  `Keys.Arrange`, `Keys.Render`, `Keys.Editor`, `Keys.Auth`, `Keys.App`.
 - Script load order (already wired in `index.html`):
-  `state.js → fit.js → flip.js → calendar.js → slips.js → arrange.js → render.js → editor.js → app.js`
+  `state.js → fit.js → flip.js → calendar.js → slips.js → arrange.js → render.js → editor.js → auth.js → app.js`
+  `auth.js` must precede `app.js`: app.js hands it the boot decision (§12).
   A module may reference another module's functions **only inside functions that
   run after `DOMContentLoaded`**, never at top level.
 - Target: current Chrome/Edge/Safari/Firefox. `document.execCommand` is used for
@@ -345,6 +346,8 @@ impossible for any template to recover mixed case.
   <div class="paper-flow">          <!-- flex COLUMN under Modern -->
 
     <header class="nl-m-head">
+      <!-- grid: minmax(0,1fr) | auto | minmax(0,1fr)
+           col 1 empty · col 2 title (centred on the SHEET) · col 3 volume -->
       <div class="nl-m-titlerow">
         <div class="nl-title      rt-out" data-bind="masthead.title">
         <div class="nl-m-volume   rt-out" data-bind="masthead.volume">
@@ -421,7 +424,13 @@ Load-bearing details, each of which was a bug first:
   keep the reference's short "Volume 1, Issue 1 2026" on one line, and it made
   that the one region no amount of shrinking could fit: a long value became an
   unbreakable line that pushed the whole page off the paper sideways. It is
-  `max-width: 34%` + `overflow-wrap: anywhere` instead.
+  `min-width: 0` + `overflow-wrap: anywhere` in a bounded grid track instead.
+- **The masthead row is a three-track grid**, not a centred flex row: the title
+  belongs in the middle track so it is centred on the *sheet*, with the volume
+  anchored right in a track the empty first track mirrors. Flex siblings made
+  the title's position depend on how long the volume string happened to be.
+  Both side tracks must be `minmax(0, 1fr)` — a plain `1fr` floors at
+  min-content and re-breaks the centring. See `docs/CLASSES.md`.
 - **`articles.page1` still renders full-width beneath the columns.** The Modern
   reference has no such region because that issue had none; dropping the list
   would silently lose content, and the columns already run the full height when
@@ -993,4 +1002,134 @@ Every module is expected to pass:
 - calendar grid correctness across a matrix of months/years,
 - add/remove slip round-trips,
 - save → load round-trip equality,
-- page-turn leaves exactly one visible page and no stuck transforms.
+- page-turn leaves exactly one visible page and no stuck transforms,
+- the sign-in gate holds the boot back, and the account rules in §12 hold.
+
+## 12. `auth.js` — accounts and the sign-in gate  → `Keys.Auth`
+
+### Read this before changing anything here
+
+**This is not an access-control boundary, and must never be described as one.**
+The app is static files opened from disk with no server behind it. Anyone
+holding the files can set the session key in devtools, edit `auth.js` to skip
+the check, or read the newsletter straight out of the saved `.json`. What the
+gate genuinely provides is that the newsletter is not on screen for whoever
+wanders up to a shared office computer, plus a record of who is working on the
+issue.
+
+That honesty is a **functional requirement**, not a disclaimer. `verify.js`
+asserts that the wording appears both on the gate and in Settings, because a
+lock that overstates itself is worse than no lock: someone will put
+confidential information behind it. If you restyle these screens, the notice
+stays.
+
+The one part that *is* done properly is password storage — see below.
+
+Real access control needs a server: sessions over HTTPS, hashing and role
+checks server-side, and the newsletter itself stored server-side (otherwise
+there is nothing to protect). That is a different project, not a change here.
+
+### Load order
+
+`auth.js` loads **before** `app.js`. `app.js` does not boot itself; it hands
+the decision over:
+
+```js
+if (Keys.Auth) Keys.Auth.start(boot);   // Auth calls boot() after sign-in
+else boot();                            // a missing lock must never brick it
+```
+
+So while the gate is up the newsletter is not merely hidden — it has never been
+rendered. `verify.js` asserts `#page-stage .paper` count is 0 and that no
+newsletter text appears in `document.body.innerText`.
+
+### Storage
+
+| Key | Where | Contents |
+|---|---|---|
+| `stpeters.keys.accounts.v1` | `localStorage` | `{ version, users: [...] }` |
+| `stpeters.keys.session.v1` | `sessionStorage` | `{ userId, startedAt }` |
+
+A user record is `{ id, name, role, salt, hash, iterations, createdAt }`.
+`role` is `'admin'` or `'user'`.
+
+The session lives in **`sessionStorage`**, so it dies with the tab, and carries
+only an id — never credentials. It also has a 12-hour absolute ceiling, so a
+browser left open overnight is not still signed in by morning.
+
+### Password storage
+
+PBKDF2-SHA256, a fresh 16-byte random salt per user, **310,000 iterations**
+(OWASP's floor for this KDF), 32-byte output, all base64. ~45 ms per
+derivation: imperceptible on sign-in, but it multiplies the cost of an offline
+dictionary attack on the stored hash by 310,000.
+
+- `crypto.subtle` needs a **secure context**. `file://` and `https://` are;
+  plain `http://` is not. Where it is missing, the gate **stands down entirely
+  and says so** (`#auth-degraded`) rather than fall back to a weaker hash. A
+  dishonest hash is worse than no hash, and bricking the office's newsletter
+  over a convenience lock is worse than both.
+- Sign-in derives a hash **even when the name is unknown**, against a random
+  salt, so a wrong name and a wrong password cost the same and return the same
+  message. Neither can be used to work out who has an account.
+- Comparison is constant-time.
+- Changing a password rotates the salt.
+
+### Rules
+
+Enforced in `Keys.Auth`, not in the UI — the UI hides what you may not do, but
+the model is what refuses:
+
+- The **first** account created is always an administrator. There is **no
+  built-in account and no default password**; a documented default is a real
+  hole even in a lock this modest.
+- Only an administrator may `addUser` or remove **someone else**.
+- Anyone may remove **themselves**, which also signs them out.
+- **The last administrator can never be removed**, by either route. Without
+  that guard an issue could be left with accounts but nobody able to manage
+  them, and the only way out would be clearing browser storage — which throws
+  the newsletter away with it. The UI renders **no** remove button in that
+  case rather than a disabled one.
+- Changing your own password requires the current one, so someone who walks up
+  to an unlocked screen cannot lock the real user out.
+- Names are unique case-insensitively; passwords are ≥ 8 characters.
+- A corrupt or hand-edited account store is **discarded, not trusted**: records
+  without usable hash material are dropped, and if that leaves none the gate
+  falls back to first-run setup. Failing towards "ask for a new password" is
+  the safe direction; failing towards "let anyone in" is not.
+
+### API
+
+```js
+Keys.Auth.hasAccounts()                      // bool
+Keys.Auth.users()                            // [{id,name,role,createdAt}] — never salt/hash
+Keys.Auth.currentUser()                      // {id,name,role} | null
+Keys.Auth.isAdmin()                          // bool
+Keys.Auth.createFirstAdmin(name, pw)         // Promise<{user}|{error}>
+Keys.Auth.signIn(name, pw)                   // Promise<{user}|{error}>
+Keys.Auth.signOut()
+Keys.Auth.addUser(name, pw, role)            // Promise<{user}|{error}>  admin only
+Keys.Auth.removeUser(id)                     // {removed,self}|{error}
+Keys.Auth.changePassword(current, next)      // Promise<{changed}|{error}>
+Keys.Auth.openSettings() / closeSettings()
+Keys.Auth.start(boot)                         // app.js hands boot over
+```
+
+Every operation re-reads the store and re-checks the caller's role. Not because
+that stops anyone — nothing here can — but so the rules live in one place and
+the UI cannot drift away from them.
+
+### Markup
+
+`#auth-gate` (outside `#app`, covers it, `body.is-locked` hides `#app` and it
+is marked `inert`), and `#settings-dialog` (a native `<dialog>`, reusing the
+`.dlg` pattern from the file-name prompt). The gear is
+`[data-act="settings"]`, in the same toolbar group as and immediately beside
+`[data-act="theme"]` — `verify.js` asserts that adjacency.
+
+### There is deliberately no test bypass
+
+`tools/verify.js` signs in by driving the real form. Do not add a query
+parameter, global, or build flag that skips the gate: it would be a genuine
+hole in shipped code, and it would stop the sign-in path being exercised on
+every run.

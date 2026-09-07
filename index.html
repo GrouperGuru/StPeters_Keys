@@ -139,6 +139,14 @@
     <div class="tb-spacer"></div>
 
     <div class="tb-group">
+      <button type="button" class="tb-btn tb-btn--icon" data-act="settings"
+              title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <path fill="currentColor" d="M8 5.4A2.6 2.6 0 1 0 8 10.6 2.6 2.6 0 0 0 8 5.4Zm0 1.5a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2Z"/>
+          <path fill="currentColor" d="M7.02.9a.6.6 0 0 0-.59.5l-.19 1.2a5.6 5.6 0 0 0-.97.56l-1.13-.44a.6.6 0 0 0-.74.26l-.98 1.7a.6.6 0 0 0 .15.77l.95.76a5.7 5.7 0 0 0 0 1.12l-.95.76a.6.6 0 0 0-.15.77l.98 1.7a.6.6 0 0 0 .74.26l1.13-.44c.3.22.63.41.97.56l.19 1.2a.6.6 0 0 0 .59.5h1.96a.6.6 0 0 0 .59-.5l.19-1.2c.34-.15.67-.34.97-.56l1.13.44a.6.6 0 0 0 .74-.26l.98-1.7a.6.6 0 0 0-.15-.77l-.95-.76a5.7 5.7 0 0 0 0-1.12l.95-.76a.6.6 0 0 0 .15-.77l-.98-1.7a.6.6 0 0 0-.74-.26l-1.13.44a5.6 5.6 0 0 0-.97-.56l-.19-1.2a.6.6 0 0 0-.59-.5H7.02Zm.51 1.5h.94l.16 1.03a.6.6 0 0 0 .43.49c.45.13.86.37 1.21.69a.6.6 0 0 0 .63.11l.97-.38.47.81-.81.65a.6.6 0 0 0-.22.6 4.2 4.2 0 0 1 0 1.4.6.6 0 0 0 .22.6l.81.65-.47.81-.97-.38a.6.6 0 0 0-.63.11c-.35.32-.76.56-1.21.69a.6.6 0 0 0-.43.49l-.16 1.03h-.94l-.16-1.03a.6.6 0 0 0-.43-.49 3.5 3.5 0 0 1-1.21-.69.6.6 0 0 0-.63-.11l-.97.38-.47-.81.81-.65a.6.6 0 0 0 .22-.6 4.2 4.2 0 0 1 0-1.4.6.6 0 0 0-.22-.6l-.81-.65.47-.81.97.38a.6.6 0 0 0 .63-.11c.35-.32.76-.56 1.21-.69a.6.6 0 0 0 .43-.49l.16-1.03Z"/>
+        </svg>
+      </button>
+
       <!-- Deliberately NOT aria-pressed: the label already names the action
            ("Switch to dark theme"), so a pressed state would both contradict
            it for screen readers and render the button permanently highlighted. -->
@@ -202,6 +210,137 @@
   </main>
 </div>
 
+<!-- =====================================================================
+     Sign-in gate.
+     Sits OUTSIDE #app and covers it. app.js does not boot until this is
+     cleared, so while it is up the newsletter is not merely hidden — it has
+     not been rendered at all.
+
+     The notice is not boilerplate. There is no server behind this app, so the
+     gate is a shared-computer lock and not a security barrier; saying so where
+     people will read it is the difference between a useful convenience and a
+     false assurance somebody trusts with confidential information.
+     ===================================================================== -->
+<div id="auth-gate" hidden>
+  <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
+    <div class="auth-brand" aria-hidden="true">
+      <span class="tb-logo">
+        <svg viewBox="0 0 24 24" width="26" height="26">
+          <path d="M12 21s-7.5-4.7-7.5-10A4.5 4.5 0 0 1 12 8.4a4.5 4.5 0 0 1 7.5 2.6c0 5.3-7.5 10-7.5 10Z" fill="#a4243b"/>
+          <path d="M11 4h2v3.2h2.4v2H13V16h-2V9.2H8.6v-2H11V4Z" fill="#fff"/>
+        </svg>
+      </span>
+    </div>
+
+    <h1 class="auth-title" id="auth-title">Sign in to St. Peter&rsquo;s Keys</h1>
+    <p class="auth-lead" id="auth-lead"></p>
+
+    <p class="auth-degraded" id="auth-degraded" hidden>
+      This browser cannot check passwords here, because the page is not in a
+      secure context. Accounts are switched off so you can still work; open the
+      file directly from disk, or serve it over <code>https://</code>, to use
+      them.
+    </p>
+
+    <form id="auth-form" novalidate>
+      <div class="auth-field">
+        <label class="auth-label" for="auth-name">Name</label>
+        <input class="auth-input" id="auth-name" type="text" autocomplete="username"
+               autocapitalize="none" spellcheck="false" required>
+      </div>
+
+      <div class="auth-field">
+        <label class="auth-label" for="auth-password">Password</label>
+        <input class="auth-input" id="auth-password" type="password"
+               autocomplete="current-password" required>
+        <p class="auth-hint" id="auth-hint"></p>
+      </div>
+
+      <div class="auth-field" id="auth-confirm-field" hidden>
+        <label class="auth-label" for="auth-confirm">Password again</label>
+        <input class="auth-input" id="auth-confirm" type="password"
+               autocomplete="new-password">
+      </div>
+
+      <p class="auth-error" id="auth-error" role="alert" hidden></p>
+
+      <button type="submit" class="tb-btn tb-btn--primary auth-submit"
+              id="auth-submit">Sign in</button>
+    </form>
+
+    <p class="auth-notice"></p>
+  </div>
+</div>
+
+<!-- =====================================================================
+     Settings. Opened by the gear in the toolbar.
+     ===================================================================== -->
+<dialog id="settings-dialog" class="dlg dlg--wide" aria-labelledby="settings-title">
+  <div class="dlg-form">
+    <div class="set-head">
+      <h2 class="dlg-title" id="settings-title">Settings</h2>
+      <button type="button" class="ed-btn ed-btn--icon" data-auth="close"
+              title="Close" aria-label="Close settings">&#10005;</button>
+    </div>
+
+    <section class="set-section">
+      <h3 class="set-h">Signed in</h3>
+      <div class="set-me">
+        <span class="set-me-name" id="settings-who"></span>
+        <span class="set-me-role" id="settings-role"></span>
+        <button type="button" class="ed-btn" data-auth="signout">Sign out</button>
+      </div>
+    </section>
+
+    <section class="set-section">
+      <h3 class="set-h">Your password</h3>
+      <form id="settings-password-form" class="set-form">
+        <label class="set-label" for="settings-current-password">Current password</label>
+        <input class="pt" id="settings-current-password" type="password"
+               autocomplete="current-password">
+        <label class="set-label" for="settings-next-password">New password</label>
+        <input class="pt" id="settings-next-password" type="password"
+               autocomplete="new-password">
+        <label class="set-label" for="settings-next-password-2">New password again</label>
+        <input class="pt" id="settings-next-password-2" type="password"
+               autocomplete="new-password">
+        <button type="submit" class="ed-btn">Change password</button>
+      </form>
+    </section>
+
+    <!-- Administrators only; hidden outright for everyone else. -->
+    <section class="set-section" id="settings-people" hidden>
+      <h3 class="set-h">People</h3>
+      <ul class="set-users" id="settings-user-list"></ul>
+
+      <form id="settings-add-form" class="set-form">
+        <label class="set-label" for="settings-new-name">Add someone</label>
+        <input class="pt" id="settings-new-name" type="text" placeholder="Name"
+               autocapitalize="none" spellcheck="false">
+        <input class="pt" id="settings-new-password" type="password"
+               placeholder="Password" autocomplete="new-password">
+        <select class="pt" id="settings-new-role" aria-label="Role">
+          <option value="user">User</option>
+          <option value="admin">Administrator</option>
+        </select>
+        <button type="submit" class="ed-btn">Add person</button>
+      </form>
+    </section>
+
+    <section class="set-section">
+      <h3 class="set-h">Your account</h3>
+      <button type="button" class="ed-btn ed-btn--danger"
+              id="settings-delete-self" data-auth="delete-self">
+        Delete my account
+      </button>
+      <p class="ed-hint">Deleting your account does not delete the newsletter.</p>
+    </section>
+
+    <p class="set-msg" id="settings-message" hidden></p>
+    <p class="set-notice"></p>
+  </div>
+</dialog>
+
 <!-- Ask for a file name before Save and before PDF export. A real <dialog>
      rather than a hand-rolled overlay: modality, focus trapping, Esc-to-close
      and the top layer all come for free, and it works over file://.
@@ -247,6 +386,9 @@
 <script src="assets/js/render.js"></script>
 <script src="assets/js/arrange.js"></script>
 <script src="assets/js/editor.js"></script>
+<!-- Before app.js: app.js hands Auth the boot decision, so the newsletter is
+     never rendered while the gate is up. -->
+<script src="assets/js/auth.js"></script>
 <script src="assets/js/app.js"></script>
 </body>
 </html>
