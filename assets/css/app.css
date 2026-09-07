@@ -3664,12 +3664,26 @@ body.is-arranging * {
 /* =============================================================================
  * 27 — SIGN-IN GATE (#auth-gate) & SETTINGS (#settings-dialog)
  * -----------------------------------------------------------------------------
- * The gate covers the whole viewport while #app is un-booted. It is chrome, so
- * it uses the app tokens and follows the theme; the paper is not involved.
+ * The gate covers the whole viewport. It is chrome, so it uses the app tokens
+ * and follows the theme; the paper is not involved.
+ *
+ * TWO lock classes, and the difference matters:
+ *
+ *   .is-locked   — the app has not booted (or has been signed out of). #app is
+ *                  display:none, because there is nothing in it worth keeping.
+ *
+ *   .is-relocked — the session lapsed while an issue was open. #app must stay
+ *                  LAID OUT: display:none would throw away scroll positions,
+ *                  collapse the editor and make signing back in feel like a
+ *                  reload, which is the one thing the in-place re-auth exists
+ *                  to avoid. The gate's own background is opaque, so nothing
+ *                  of the newsletter is legible behind it either way.
  * ========================================================================== */
 
 body.is-locked { overflow: hidden; }
 body.is-locked #app { display: none; }
+
+body.is-relocked { overflow: hidden; }
 
 #auth-gate {
   position: fixed;
@@ -3790,6 +3804,13 @@ body.is-locked #app { display: none; }
 
 .auth-error[hidden] { display: none; }
 
+/* NOT used by #auth-gate any more — the "accounts are switched off, this page
+ * is not a secure context" state it was written for is gone, along with all
+ * browser-side hashing. The class stays because the server-rendered sign-in
+ * pages (server/login.html, server/setup.html) use it for their plain-http
+ * warning, and app.css is deliberately allowlisted to them so those pages
+ * look like the rest of the app. The name is a leftover; the box is now
+ * simply "a warning, in a card". `.auth-hint` above is theirs too. */
 .auth-degraded {
   margin: 0 0 var(--sp-4);
   padding: var(--sp-2) var(--sp-3);
@@ -3804,7 +3825,7 @@ body.is-locked #app { display: none; }
 .auth-degraded[hidden] { display: none; }
 
 .auth-degraded p { margin: 0 0 var(--sp-2); }
-.auth-degraded p:last-of-type { margin-bottom: var(--sp-3); }
+.auth-degraded p:last-of-type { margin-bottom: 0; }
 
 .auth-degraded code {
   padding: 0 3px;
@@ -3973,6 +3994,358 @@ body.is-locked #app { display: none; }
   color: var(--danger-strong);
 }
 
+/* --- 27, continued: the two mode-dependent settings states ---------------- *
+ * Both replace content rather than decorate it, so both are sized to be read
+ * as prose rather than skimmed as a badge.
+ * -------------------------------------------------------------------------- */
+
+/* "You are on plain http:// to another machine." A warning, not an error:
+ * nothing has gone wrong, but a password is about to be typed into a form
+ * that will cross the network in the clear. It sits directly under the
+ * dialog's title, above everything it is warning about. */
+.set-warn {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--warn-border);
+  border-radius: var(--r-md);
+  background: var(--warn-bg);
+  color: var(--warn-strong);
+  font-size: var(--fs-12);
+  line-height: 1.45;
+}
+
+.set-warn[hidden] { display: none; }
+
+/* "Opened from disk." Not a warning and not an error — it is the ordinary
+ * state of a copy someone double-clicked, and dressing it in red would train
+ * people to ignore the colour. Quiet, and where the roster would have been. */
+.set-offline {
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-sunken);
+  color: var(--text-muted);
+  font-size: var(--fs-12);
+  line-height: 1.5;
+}
+
+.set-offline[hidden] { display: none; }
+
 @media (prefers-reduced-motion: reduce) {
   .auth-submit { transition: none; }
+}
+
+
+/* =============================================================================
+ * 28 — SAVE-FOR-LATER DRAWER  (#stash)
+ * -----------------------------------------------------------------------------
+ * A cabinet drawer down the right edge of #preview-pane, which is
+ * `position: relative; overflow: hidden` — so the closed drawer is genuinely
+ * clipped away by the pane rather than merely hidden, and only the handle
+ * remains sticking out.
+ *
+ * The whole aside slides, handle included. The handle is offset LEFT of the
+ * panel by its own width, so when the aside is pushed fully off the right edge
+ * the handle is exactly what is left on screen.
+ * ========================================================================== */
+.stash {
+  --stash-w: 288px;
+  --stash-handle-w: 34px;
+
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-thumbs);
+  width: var(--stash-w);
+  display: flex;
+  transform: translateX(100%);
+  transition: transform var(--dur-3, 260ms) var(--ease-out);
+}
+
+.stash.is-open { transform: translateX(0); }
+
+/* --- the handle ----------------------------------------------------------- */
+.stash-handle {
+  position: absolute;
+  left: calc(-1 * var(--stash-handle-w));
+  top: 50%;
+  transform: translateY(-50%);
+  width: var(--stash-handle-w);
+  min-height: 132px;
+  padding: var(--sp-3) 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+
+  border: 1px solid var(--border-strong);
+  border-right: 0;
+  border-radius: var(--r-lg) 0 0 var(--r-lg);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  cursor: pointer;
+  box-shadow: -2px 0 10px rgba(0, 0, 0, 0.22);
+  -webkit-user-select: none;
+  user-select: none;
+  transition:
+    background-color var(--dur-1) var(--ease-standard),
+    color var(--dur-1) var(--ease-standard),
+    box-shadow var(--dur-1) var(--ease-standard);
+}
+
+.stash-handle:hover {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.stash-handle:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring-flat), -2px 0 10px rgba(0, 0, 0, 0.22);
+}
+
+/* The pull: two ridges, like the milled grip on a real drawer front. */
+.stash-handle-grip {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 22px;
+  border-radius: 2px;
+  background:
+    linear-gradient(to right,
+      transparent 0 3px, currentColor 3px 5px,
+      transparent 5px 9px, currentColor 9px 11px, transparent 11px);
+  opacity: 0.55;
+}
+
+.stash-handle-label {
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);      /* reads bottom-to-top, like a book spine */
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.stash-handle-count {
+  flex: 0 0 auto;
+  min-width: 18px;
+  padding: 1px 4px;
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: var(--text-invert);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-bold);
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.stash-handle-count[hidden] { display: none; }
+
+/* --- the drawer body ------------------------------------------------------ */
+.stash-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border-strong);
+  background: var(--surface-rail);
+  box-shadow: -10px 0 30px rgba(0, 0, 0, 0.30);
+}
+
+.stash-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+  padding: var(--sp-3) var(--sp-3) var(--sp-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.stash-title {
+  margin: 0;
+  font-size: var(--fs-13);
+  font-weight: var(--fw-semi);
+  color: var(--text-strong);
+}
+
+.stash-lead,
+.stash-empty,
+.stash-foot {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-11);
+  line-height: 1.5;
+  color: var(--text-subtle);
+}
+
+.stash-foot {
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-faint);
+}
+
+.stash-empty[hidden] { display: none; }
+
+.stash-foot code {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--surface-active);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.94em;
+}
+
+/* THE scrolling region: `min-height: 0` is what lets a flex child actually
+ * scroll instead of growing the drawer past the pane. */
+.stash-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3) var(--sp-3);
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+/* --- an item -------------------------------------------------------------- */
+/* Two rows, not one.
+ *
+ * Side by side, three buttons left about 150px of a 288px drawer for the name,
+ * so every label came out as "THIS THURSDAY, …" — which defeats the point of
+ * naming them. The name now gets the full width and the actions sit under it. */
+.stash-item {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: var(--sp-2);
+  row-gap: var(--sp-1);
+  padding: var(--sp-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-raised);
+  box-shadow: var(--sh-1);
+}
+
+.stash-item.is-new { animation: stash-in var(--dur-3, 260ms) var(--ease-out); }
+
+@keyframes stash-in {
+  from { transform: translateX(14px); box-shadow: 0 0 0 3px var(--brand-200); }
+  to   { transform: none; }
+}
+
+.stash-item-icon {
+  grid-column: 1;
+  grid-row: 1;
+  text-align: center;
+  font-size: var(--fs-13);
+  color: var(--text-muted);
+}
+
+.stash-item-main {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.stash-item-name {
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semi);
+  line-height: 1.35;
+  color: var(--text-strong);
+  overflow-wrap: anywhere;
+  /* Two lines, then ellipsis — enough for a real name, never enough to push
+   * the rest of the drawer off screen. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.stash-item-meta {
+  font-size: var(--fs-11);
+  color: var(--text-subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stash-item-tools {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-1);
+}
+
+.stash-btn {
+  height: 24px;
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm, 4px);
+  background: var(--surface-raised);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: var(--fs-11);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.stash-btn:hover {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+.stash-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+
+.stash-btn--icon { width: 24px; padding: 0; }
+
+.stash-btn--go {
+  border-color: var(--brand-300);
+  color: var(--text-brand, var(--brand));
+  font-weight: var(--fw-semi);
+}
+
+.stash-btn--danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+/* --- drag-and-drop target ------------------------------------------------- */
+/* Reachable while the drawer is still closed: hovering the handle mid-drag
+ * slides it open (arrange.js), so the whole aside lights up. */
+.stash.is-drop-target .stash-panel,
+.stash.is-drop-target .stash-handle {
+  border-color: var(--brand);
+  background: var(--brand-50);
+}
+
+.stash.is-drop-target .stash-panel {
+  box-shadow: inset 0 0 0 2px var(--brand), -10px 0 30px rgba(0, 0, 0, 0.30);
+}
+
+.stash.is-drop-target .stash-handle { color: var(--brand); }
+
+/* Never in the way of a drag that is aimed past it at the paper. */
+body.is-arranging .stash-panel { pointer-events: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .stash { transition: none; }
+  .stash-item.is-new { animation: none; }
+}
+
+/* Narrow windows: the drawer would cover the whole preview, so cap it. */
+@media (max-width: 900px) {
+  .stash { --stash-w: min(288px, 62vw); }
 }

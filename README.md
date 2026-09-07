@@ -2,87 +2,195 @@
 
 A web-based newsletter generator for St. Peter's Lutheran School.
 
-Open `index.html` in a browser. There is no build step, no install, and no
-network access — it runs straight from disk.
+There is no build step, no install and no dependencies. There are **two ways to
+run it**, and they behave differently on purpose:
+
+- **Served** — `node server/server.js`, then open the address it prints.
+  Accounts live on the server, and the sign-in is a real lock: nothing reaches
+  a browser without a valid session. This is the one to use for a shared
+  office machine, a VM, or anybody who is not you.
+- **Offline** — open `index.html` straight from a folder. No server, therefore
+  no accounts and no sign-in at all. This is the one to use on your own laptop.
+
+Everything else — the editor, the templates, the drawer, the PDF export — is
+identical in both.
+
+## Running the server
+
+Node 24 or later, nothing to install:
+
+```sh
+node server/server.js
+```
+
+It prints the address it is listening on, and on a fresh machine a **setup
+token**. Open the address, paste the token, create the administrator account.
+That is the entire installation.
+
+### First run: the setup token
+
+**If you have just cloned this onto a VM and nothing ever asked you to create
+an administrator, this is the section you want.** The app no longer prompts
+you in the browser — the *server* does, in its console, at every start until
+an account exists:
+
+```
+────────────────────────────────────────────────────────
+  FIRST-RUN SETUP
+  Open   http://localhost:8749/setup
+  Token  4KJ2-9WQX-7ATB-1MZP
+────────────────────────────────────────────────────────
+```
+
+Lost the console — started it from `systemd`, or closed the window? The same
+token is on disk:
+
+```sh
+cat server/data/setup-token.txt        # or $KEYS_DATA/setup-token.txt
+sudo journalctl -u keys -f             # if you run it as a service
+```
+
+Capitals and hyphens don't matter when you type it in. Until the first account
+exists, `/` sends you to `/setup` rather than to a sign-in form for an account
+nobody has yet; the moment it does exist the token is spent and `/setup` is
+closed for good.
+
+The token is there so the administrator account can't be claimed by whoever
+reaches the machine first. On a shared network, "deploy the app" and "hand the
+parish newsletter to a stranger" would otherwise be the same act.
+
+### Configuration
+
+Environment variables, all of them optional:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `KEYS_PORT` | `8749` | Listen port |
+| `KEYS_HOST` | `0.0.0.0` | Listen address; `127.0.0.1` for local-only |
+| `KEYS_DATA` | `server/data` | Where `accounts.json` lives |
+| `KEYS_IDLE_MS` | `300000` | Idle timeout, in milliseconds |
+| `KEYS_TLS_CERT`, `KEYS_TLS_KEY` | — | If **both** are set, the server speaks HTTPS |
+| `KEYS_TRUST_PROXY` | `0` | Trust `X-Forwarded-For`/`-Proto` from a reverse proxy |
+
+Two things are deliberately not configurable: a session expires after 12 hours
+however busy you have been, and passwords are always PBKDF2-HMAC-SHA256 at
+310,000 iterations.
+
+### TLS, and the plain-`http://` warning
+
+**Do this.** Over plain HTTP every password typed into the sign-in page crosses
+the network in the clear, and so does the session cookie and the newsletter
+itself. Nothing about that failure is visible, because everything appears to
+work — so the server warns at every start, and the app puts a warning in
+Settings whenever the connection is not encrypted and not to this machine.
+
+Either let the server do it:
+
+```sh
+KEYS_TLS_CERT=/etc/keys/fullchain.pem \
+KEYS_TLS_KEY=/etc/keys/privkey.pem \
+node server/server.js
+```
+
+(both variables, or neither), or terminate TLS in a reverse proxy in front and
+set `KEYS_TRUST_PROXY=1` so the server knows the browser is on HTTPS.
+`server/README.md` has an `nginx` example, a `systemd` unit, and the one trap
+worth knowing about — a `Secure` cookie on a connection that isn't really TLS
+produces an endless redirect back to `/login` with no error anywhere.
+
+### Forgotten the administrator password?
+
+Every lock needs a documented way back in. This is it, run on the machine
+hosting the server:
+
+```sh
+node server/reset-accounts.js          # --yes to skip the confirmation
+```
+
+It lists the accounts, asks you to type `DELETE`, removes `accounts.json` and
+issues a fresh setup token — so you start again from `/setup`. It **never
+touches newsletter content**, and it destroys the accounts rather than
+revealing them: whoever runs it has to set up a new administrator in front of
+everybody. It needs shell access on the box, which is a higher bar than knowing
+a password.
+
+There is no browser equivalent, and there can't be: a page cannot wipe a
+server's accounts.
+
+### More
+
+`server/README.md` is the operator's guide — deployment, `systemd`, TLS,
+backups, and what is served and what is not. `docs/AUTH-API.md` is the contract
+between the server and the browser: routes, cookies, error codes, expiry rules.
+
+**Something not behaving?** From the browser console:
+
+```js
+Keys.Auth.diagnose()
+```
+
+It reports the *server's* view — which mode the app is in, whether the
+connection is encrypted, whether the server is answering, whether any accounts
+exist, who you are signed in as — plus a plain-English `summary` naming the
+reason.
 
 ## Signing in
 
-The first time you open it, the app asks you to create the **administrator**
-account — there is no built-in account and no default password. After that,
-everyone signs in by name and password.
+Served over `http://` or `https://`, everyone signs in by name and password on
+the server's own sign-in page. There is no built-in account and no default
+password; the first administrator is created once, at `/setup`, with the
+one-time token above.
 
 - The **administrator** can add and remove people, from **Settings → People**.
 - **Anyone** can change their own password or delete their own account.
 - The **last administrator** can't be removed, by themselves or anyone else —
   otherwise nobody would be able to manage accounts again.
 
-Deleting an account never deletes the newsletter. Signing out clears the
-session; closing the tab does too.
+Deleting an account never deletes the newsletter. Signing out destroys the
+session on the server. Closing the browser discards the cookie, so that session
+can't be used again either — and restarting the server signs everybody out,
+because sessions are only ever held in its memory.
 
-**You are signed out after 5 minutes of inactivity** and asked to sign in
-again. It's five minutes of *not touching anything* — any typing, clicking,
-scrolling or mouse movement resets the clock, so it will never interrupt you
-mid-article. You get a warning about half a minute before, and your work is
-saved automatically first: sign back in and the issue is exactly as you left
-it, including edits you hadn't saved to a file.
+Changing your password signs out anyone signed in as you somewhere else, and
+leaves the window you changed it in alone.
 
-> ### What this does and doesn't protect
+**You are signed out after 5 minutes of inactivity.** It's five minutes of
+*not touching anything* — any typing, clicking, scrolling or mouse movement
+resets the clock, so it will never interrupt you mid-article. You get a warning
+about half a minute before. When it does happen the sign-in panel comes back
+**over** your work rather than instead of it: the issue is still open behind
+it, already saved, and signing in puts you straight back where you were with
+nothing reloaded and nothing retyped. A session also ends 12 hours after you
+signed in, however busy you have been.
+
+Opened from disk, none of the above applies: there is nobody to sign in as and
+the app simply opens.
+
+> ### What this protects, and what it doesn't
 >
-> This app is static files opened straight from disk. **There is no server, so
-> the sign-in is not a security barrier.** It keeps the newsletter out of the
-> way of whoever wanders up to a shared office computer, and records who is
-> working on the issue. It cannot stop anyone who has the files: they can open
-> the browser's developer tools, edit `assets/js/auth.js`, or read the saved
-> `.json` directly.
+> **Served over `http://` or `https://`, the sign-in is a real lock.** The
+> server will not send the newsletter — or the app that edits it, or the list
+> of who has an account — to anyone without a valid session. Passwords are
+> hashed on the server with PBKDF2-SHA256, a random salt per person and
+> 310,000 iterations; what is kept is never the password itself, and never
+> travels back to a browser. Sessions are held in the server's memory, close
+> after 5 minutes without activity and after 12 hours regardless, and are gone
+> entirely when the server restarts.
 >
-> **So please don't keep anything confidential in the newsletter.**
+> **What it does not do is encrypt anything.** If you reach the app over a
+> plain `http://` address, your name, your password and the newsletter itself
+> travel across the network in a form anyone else on that network can read.
+> Use `https://` — see TLS above — or a network you trust. The newsletter is
+> not encrypted where it is stored, either: it lives in the browser's storage
+> and in whatever `.json` files people have saved.
 >
-> Passwords themselves are handled properly — hashed with PBKDF2-SHA256, a
-> random salt per person and 310,000 iterations — so a password you also use
-> elsewhere isn't given away by a glance at browser storage. That is a real
-> protection; the login as a whole is not.
+> **Opened straight from disk over `file://` there is no gate at all**, and
+> that is a decision rather than an oversight. There is no server to
+> authenticate against, and a sign-in box that anyone could delete by editing
+> one file protects nothing from somebody who already has the files. Anyone who
+> can open the folder can read the newsletter.
 >
-> Real access control would need a server. See `docs/SPEC.md` §12.
-
-### Putting it on a server
-
-Accounts need a **secure context** — the browser only allows the password
-cryptography over `https://`, on `localhost`, or when the file is opened
-directly from disk.
-
-**Serving it over plain `http://` on a VM or intranet box switches accounts
-off**, because `crypto.subtle` simply isn't there. The app says so on the
-first screen and in the browser console rather than quietly opening with no
-sign-in. To fix it, do any one of:
-
-- put a certificate on it and serve `https://` (Let's Encrypt, or a self-signed
-  certificate for an internal box);
-- reach it through an SSH tunnel, so the browser sees `localhost`:
-  `ssh -L 8080:localhost:80 user@your-vm`, then open `http://localhost:8080`;
-- or just open `index.html` from disk, which is what the app is designed for.
-
-**Not being prompted to create an administrator?** Open the browser console and
-run:
-
-```js
-Keys.Auth.diagnose()
-```
-
-It reports, in one object, whether the page is in a secure context, whether
-`crypto.subtle` exists, whether storage works, how many accounts there are, and
-a plain-English `summary` of which of those is the reason. The usual answers
-are the `http://` problem above, or that accounts already exist on that browser
-profile — accounts live in that browser's storage, so each machine and each
-profile sets up separately.
-
-To start over — a forgotten administrator password, or a half-finished setup —
-run this in the console and reload:
-
-```js
-Keys.Auth.resetAllAccounts()
-```
-
-It clears every account and **leaves the newsletter untouched**.
+> **Either way, please don't keep anything confidential in the newsletter.**
 
 ## Using it
 
@@ -142,9 +250,12 @@ and it has to print.
 | Bold / italic / underline | `Ctrl`/`Cmd` + `B` / `I` / `U` |
 | Previous / next page | `Alt` + `←` / `→` |
 
-Three things are remembered between visits, separately from the newsletter
-itself: your theme choice, the accounts, and a working copy of the current
-issue. Your sign-in is remembered only until you close the tab.
+Three things are remembered in your browser between visits, separately from the
+newsletter file itself: your theme choice, the save-for-later drawer, and a
+working copy of the current issue. Accounts are **not** among them — they live
+on the server, which is why they are the same on every machine that reaches it.
+Your sign-in is a cookie the browser holds only until you close it, and a
+session the server drops sooner than that if you go quiet.
 
 The two panes are linked both ways:
 
@@ -172,6 +283,32 @@ The two panes are linked both ways:
 
 The numbered badges beside each section heading, and the thumbnails under the
 preview, also jump between pages.
+
+## Save for later
+
+Down the right-hand edge of the preview is a **drawer**. Click its handle and it
+slides out to show boxes you have kept for another week — the lunch slips and
+forms you print again and again.
+
+There are two ways to put something in it, and both ask you to **name it** so
+you can find it later:
+
+- press the **⤓** button on the box in the *Lunch Slips and Forms* section; or
+- **drag the box from the page onto the drawer**. Hovering the handle mid-drag
+  slides the drawer open so you can see where it is going.
+
+Saving takes a **copy** — the box stays on the page. Press **Add** on a saved
+item to drop a copy back onto the lunch slips page; the drawer keeps its copy,
+so you can use the same slip every week. Each item can be renamed with **✎** or
+thrown away with **✕**, and removing one never changes the newsletter.
+
+The drawer starts out holding the boxes from the issue you first opened, so
+there is something in it to try.
+
+> Saved boxes live **in this browser**, not inside the newsletter file. That is
+> deliberate: it means they stay put when you start a new issue, instead of
+> being replaced every time you open a different `.json`. The trade-off is that
+> e-mailing someone your `.json` does not send them your saved boxes.
 
 Work is kept in your browser automatically, so closing the tab by accident
 won't lose the issue. **Save** writes a `.json` file you can keep, e-mail, or
@@ -249,15 +386,32 @@ assets/js/slips.js      page 3
 assets/js/arrange.js    drag-to-reorder sections, with the overflow guard
 assets/js/render.js     builds the preview pages
 assets/js/editor.js     builds the editing rail
-assets/js/auth.js       accounts, the sign-in gate, the Settings panel
+assets/js/stash.js      the save-for-later drawer
+assets/js/auth.js       identity, the re-entry gate, the Settings panel
 assets/js/app.js        bootstrap and event wiring
+server/server.js        the listener, routing, static allowlist, JSON API
+server/accounts.js      password hashing, the accounts file, the account rules
+server/sessions.js      in-memory sessions and both expiry clocks
+server/ratelimit.js     the sign-in backoff
+server/login.html       the sign-in page, served at /login
+server/setup.html       the first-run page, served at /setup
+server/reset-accounts.js  the way back in when the admin password is lost
+server/README.md        running and deploying the server
 docs/SPEC.md            module contract — read before changing anything
 docs/CLASSES.md         CSS class contract for the paper
+docs/AUTH-API.md        the server ↔ browser contract for accounts
 tools/verify.js         automated browser checks
 ```
 
-`docs/SPEC.md` is the contract between these modules. The interfaces and class
-names in it are load-bearing — several modules depend on them by string.
+The server has no `package.json`, no `node_modules` and no lockfile, and must
+never grow one: only Node's own `http`, `https`, `crypto`, `fs`, `path` and
+`url` are used. A parish runs this unattended for years, and every package
+added is something somebody has to patch long after they stopped thinking
+about it.
+
+`docs/SPEC.md` is the contract between these modules, and `docs/AUTH-API.md`
+between the server and the browser. The interfaces and class names in them are
+load-bearing — several modules depend on them by string.
 
 ## Running the checks
 

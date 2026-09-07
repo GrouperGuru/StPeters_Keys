@@ -3,6 +3,11 @@
 Consolidated from the implemented modules. `paper.css` must style everything
 here. Reference renders: `docs/pg-1.png` … `docs/pg-4.png`.
 
+One section at the end is not paper: the sign-in gate and Settings chrome,
+which lives in `app.css`. It is here because it is the one part of the
+stylesheet where a rule with no matching markup in `index.html` may still be
+in use — see that section before deleting anything from it.
+
 Font stacks used throughout:
 
 ```css
@@ -277,3 +282,80 @@ Optional per-density tuning: `.cal-grid[data-weeks="6"] .cal-daynum { font-size:
 Plus: hide `#toolbar`, `#editor-pane`, `#rail-resizer`, `#thumb-rail`, `#toasts`;
 reset `#app`/`#workspace` to plain block flow; last page must not emit a trailing
 blank sheet (`.paper:last-child { break-after: auto }`).
+
+---
+
+## The sign-in gate and Settings — `auth-*` / `set-*` (app.css, not paper.css)
+
+Chrome, not paper. It is written down here anyway because this is the project's
+class contract, and because §27 of `app.css` is now the one place where "this
+rule has no matching markup" is **not** a safe conclusion. Read the trap at the
+bottom of this section before deleting anything from it.
+
+### What changed when accounts moved to the server
+
+`index.html` no longer creates accounts or explains a degraded browser, so
+these are **gone from the markup** (SPEC §12):
+
+| Removed | Was for |
+|---|---|
+| `#auth-degraded` | "accounts are switched off, this page is not a secure context" — a state that can no longer occur, because nothing in the browser hashes anything now |
+| `#auth-confirm-field`, `#auth-confirm` | the "type the password again" field of first-run setup. The gate never creates the first account; the server's `/setup` page does, behind a one-time token |
+| `#auth-hint` | per-field help on that same setup form |
+
+**Added** to `#settings-dialog`:
+
+| Element | Class | What it is |
+|---|---|---|
+| `#settings-insecure` | `.set-warn` | Plain `http://` to a host that is not this machine. Filled in and un-hidden by `auth.js` — Settings is where passwords get typed, so it is the right place to say they are crossing the network in the clear |
+| `#settings-offline` | `.set-offline` | Opened from disk: shown **instead of** the roster and forms, which have nothing to talk to |
+| `#settings-signout` | — | Sign out. Hidden offline; there is nobody to sign out |
+| `#settings-password-section` | `.set-section` | Hidden offline |
+| `#settings-account-section` | `.set-section` | Hidden offline |
+| `#settings-me-h` | `.set-h` | Heading whose **text changes with the mode**: "Signed in" served, "Accounts" offline. "Signed in" would be a heading that lies where nobody is signed in and nobody can be |
+
+New CSS, all in `app.css` §27:
+
+```css
+body.is-relocked { overflow: hidden; }   /* NOT display:none on #app */
+.set-warn    { warning card — the plain-http notice }
+.set-offline { quiet card — the file:// note }
+```
+
+**`body.is-relocked` is not a synonym for `body.is-locked`.** `is-locked`
+blanks `#app` with `display: none`, which is right when the app has not booted
+and there is nothing in it worth keeping. `is-relocked` is the lapsed-session
+case, where an issue is open behind the gate: `#app` must **stay laid out**, or
+signing back in throws away scroll positions, collapses the editor and feels
+exactly like the reload that path exists to avoid. The gate's own background is
+opaque, so nothing of the newsletter is legible either way. Do not "simplify"
+the two into one.
+
+`.auth-notice` and `.set-notice` are **empty in the markup on purpose** and
+filled by `auth.js`, because the truthful sentence differs between served and
+offline mode. Style them; never hard-code text into them.
+
+### The trap: `.auth-degraded` and `.auth-hint` are NOT dead rules
+
+Both are still in `app.css`, and nothing in `index.html` uses either. Every
+instinct says delete them. **Don't.**
+
+`server/login.html` and `server/setup.html` are server-rendered pages that link
+`/assets/css/app.css` — the single asset the server serves **without a
+session**, precisely so the sign-in page is styled like the rest of the app.
+Both use `.auth-card`, `.auth-brand`, `.auth-title`, `.auth-lead`,
+`.auth-note`, `.auth-field`, `.auth-label`, `.auth-input`, `.auth-error`,
+`.auth-submit` and `.auth-notice` — and `.auth-degraded`, for a plain-http
+warning (`#insecure-note`), which `index.html` no longer does. `.auth-hint` is
+`setup.html`'s, on the per-field help under the token, name and password boxes.
+
+`.auth-degraded` now means simply "a warning, in a card": on those pages it
+carries the plain-http warning. The name is a leftover from the secure-context
+state it was written for. Renaming it means editing two files in `server/` in
+the same commit.
+
+So the rule for §27 of `app.css` is: **a selector with no match in
+`index.html` may still be live.** Grep `server/*.html` before removing one.
+A stylesheet is also the one thing a stranger can fetch from this server before
+signing in, so treat its contents as public — which they are, and which is
+fine: it gives away the colour of the buttons.

@@ -484,6 +484,46 @@
     for (var i = 0; i < t.length; i++) t[i].classList.remove('is-drop-target');
   }
 
+  /* ---------------------------------------------------------------------------
+   * The save-for-later drawer as a drop target.
+   *
+   * Dropping on the drawer does NOT move the block — it copies it into the
+   * stash and leaves the page exactly as it was. So it deliberately bypasses
+   * commit(): there is no layout change to guard against, and running the
+   * overflow check would let a full page refuse a save that cannot overflow
+   * anything.
+   * ------------------------------------------------------------------------ */
+  function hits(rect, x, y, pad) {
+    if (!rect || !rect.width || !rect.height) return false;
+    return x >= rect.left - pad && x <= rect.right + pad &&
+           y >= rect.top - pad && y <= rect.bottom + pad;
+  }
+
+  function stashTargetAt(x, y, kind) {
+    if (kind !== 'slip') return null;          // only slips can be stashed
+    var el = document.getElementById('stash');
+    if (!el || !Keys.Stash) return null;
+
+    /* Test the handle SEPARATELY, not just the drawer.
+     *
+     * The handle hangs off the drawer's left edge, outside its box, and a
+     * closed drawer is translated fully off the right of the pane — so its own
+     * rect is off-screen and the only part the user can actually aim at is the
+     * one part hit-testing the parent misses. Dropping on the handle of a
+     * closed drawer is the obvious gesture, and it silently did nothing. */
+    var handleEl = document.getElementById('stash-handle');
+    if (hits(el.getBoundingClientRect(), x, y, 4) ||
+        hits(handleEl && handleEl.getBoundingClientRect(), x, y, 8)) {
+      return { stash: el };
+    }
+    return null;
+  }
+
+  function clearStashHighlight() {
+    var el = document.getElementById('stash');
+    if (el) el.classList.remove('is-drop-target');
+  }
+
   function onDragMove(e) {
     if (!drag) return;
     if (!drag.active) {
@@ -496,6 +536,24 @@
     }
 
     clearThumbHighlight();
+    clearStashHighlight();
+
+    /* The drawer wins over everything else it overlaps: it sits on top of the
+     * canvas, so a pointer inside it is unambiguously aimed at it. Hovering it
+     * mid-drag also slides it open, which is both the affordance and the only
+     * way to see where the block is going. */
+    var onStash = stashTargetAt(e.clientX, e.clientY, drag.kind);
+    if (onStash) {
+      onStash.stash.classList.add('is-drop-target');
+      if (!Keys.Stash.isOpen()) Keys.Stash.open();
+      drag.target = { toStash: true };
+      hideIndicator();
+      var sr = layerRect();
+      handle.style.left = Math.round(e.clientX - sr.left - 10) + 'px';
+      handle.style.top = Math.round(e.clientY - sr.top - 10) + 'px';
+      return;
+    }
+
     var onThumb = thumbAt(e.clientX, e.clientY, drag.kind);
     if (onThumb && onThumb.container !== drag.block.closest('[data-drop]')) {
       onThumb.thumb.classList.add('is-drop-target');
@@ -530,9 +588,18 @@
     if (d.block) d.block.classList.remove('is-dragging');
     hideIndicator();
     clearThumbHighlight();
+    clearStashHighlight();
     hideHandle();
 
     if (!d.active || !d.target) return;
+
+    /* Dropped on the drawer: copy, do not move. */
+    if (d.target.toStash) {
+      var slipId = d.block.getAttribute('data-move-key');
+      if (Keys.Stash && slipId) Keys.Stash.stashSlip(slipId);
+      return;
+    }
+
     var fn = APPLY[d.kind];
     if (!fn) return;
     var where = d.target.viaThumb ? ' to page ' + d.target.viaThumb : '';

@@ -49,43 +49,164 @@ function section(title) {
 }
 
 /* ---------------------------------------------------------------------------
- * Sign-in helper.
+ * NO SIGN-IN HELPER, AND THAT IS THE POINT.
  *
- * auth.js holds app.js's boot back until someone signs in, so every fresh
- * context — and every reload after localStorage is cleared — has to go through
- * the gate before the rest of the suite has an app to test. This drives the
- * REAL API rather than poking the session key directly: there is deliberately
- * no test bypass in the shipped code, and a harness that installed one would
- * stop the sign-in path from being exercised on every single run.
+ * The bulk of this suite runs on file://, which auth.js calls "offline" mode:
+ * there is no server to authenticate against, so there is no gate and boot()
+ * is called immediately. Nothing to drive, nothing to wait for.
+ *
+ * The rule the old helper's comment protected still stands and is now enforced
+ * in the served suite instead: there is deliberately NO test bypass in the
+ * shipped code, and this harness must not add one. The served checks below
+ * spawn the real server, walk the real /setup page, and sign in through the
+ * real forms and the real API — never by writing a cookie or a session key by
+ * hand. A harness that installed a back door would leave the one path every
+ * user takes untested on every run.
  * ------------------------------------------------------------------------ */
-const HARNESS_USER = 'Verify Harness';
-const HARNESS_PW = 'verify-harness-passphrase';
 
-async function signIn(target) {
-  const state = await target.evaluate(() => {
-    const A = window.Keys && window.Keys.Auth;
-    if (!A) return { error: 'Keys.Auth did not load' };
-    if (A.currentUser()) return { already: true };
-    const gate = document.getElementById('auth-gate');
-    return { gateShown: !!gate && !gate.hidden, firstRun: !A.hasAccounts() };
+/* ---------------------------------------------------------------------------
+ * Served-mode plumbing.
+ *
+ * These checks need a REAL server on a REAL port. Ports come from 8780-8799,
+ * one per server so a socket left in TIME_WAIT by an earlier server cannot
+ * collide with a later one, and every process spawned here is recorded so it
+ * can be stopped again. Nothing else on this machine is ever signalled: the
+ * harness kills only what it started.
+ * ------------------------------------------------------------------------ */
+const { spawn } = require('child_process');
+const os = require('os');
+const http = require('http');
+
+const SERVER_JS = path.join(ROOT, 'server', 'server.js');
+const PORT_BASE = 8780;
+let nextPort = PORT_BASE;
+const spawned = [];          // every child this run created, and nothing else
+
+function startServer(env) {
+  const port = nextPort++;
+  if (port > 8799) throw new Error('ran out of ports in the 8780-8799 range');
+
+  // A fresh KEYS_DATA every time: these checks are about first-run behaviour
+  // as much as anything, and an inherited accounts.json would skip it.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'keys-verify-'));
+
+  const proc = spawn(process.execPath, [SERVER_JS], {
+    env: Object.assign({}, process.env, {
+      KEYS_PORT: String(port), KEYS_HOST: '127.0.0.1', KEYS_DATA: dir
+    }, env || {}),
+    stdio: ['ignore', 'pipe', 'pipe']
   });
 
-  if (state.error) throw new Error('harness sign-in: ' + state.error);
-  if (state.already) return 'already signed in';
-  if (!state.gateShown) return 'gate not shown';
+  let log = '';
+  proc.stdout.on('data', d => { log += d; });
+  proc.stderr.on('data', d => { log += d; });
 
-  await target.fill('#auth-name', HARNESS_USER);
-  await target.fill('#auth-password', HARNESS_PW);
-  if (state.firstRun) await target.fill('#auth-confirm', HARNESS_PW);
-  await target.click('#auth-submit');
+  const server = {
+    proc, dir, port,
+    base: 'http://127.0.0.1:' + port,
+    log: () => log,
+    stopped: false,
+    stop() {
+      if (this.stopped) return Promise.resolve();
+      this.stopped = true;
+      // Only ever this PID, and only ever one we spawned ourselves.
+      try { proc.kill('SIGTERM'); } catch (e) {}
+      return new Promise(r => {
+        const done = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} r(); }, 3000);
+        proc.on('exit', () => { clearTimeout(done); r(); });
+      }).then(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {} });
+    }
+  };
+  spawned.push(server);
+  return server;
+}
 
-  // The gate boots the app on a successful submit; the sheets appearing is the
-  // signal that it finished.
-  await target.waitForFunction(
-    () => document.querySelectorAll('#page-stage .paper').length > 0,
-    null, { timeout: 10000 });
-  await target.waitForTimeout(700);
-  return state.firstRun ? 'created the administrator' : 'signed in';
+async function stopAllServers() {
+  for (const s of spawned) await s.stop();
+}
+
+/** One raw HTTP request, resolving rather than rejecting so a check can assert
+ *  on a refusal as easily as on a success. `cookie` is passed explicitly: this
+ *  helper holds no jar, so an unauthenticated probe cannot accidentally borrow
+ *  a session from a previous one — which is the whole thing several of the
+ *  access-control checks below are trying to prove. */
+function req(server, method, urlPath, opts) {
+  const o = opts || {};
+  return new Promise((resolve) => {
+    const headers = Object.assign({}, o.headers || {});
+    let body = null;
+    if (o.json !== undefined) {
+      body = Buffer.from(JSON.stringify(o.json), 'utf8');
+      if (headers['Content-Type'] === undefined) {
+        headers['Content-Type'] = 'application/json';
+      }
+      headers['Content-Length'] = body.length;
+    }
+    if (headers['Content-Type'] === null) delete headers['Content-Type'];
+    if (o.cookie) headers['Cookie'] = o.cookie;
+    if (o.origin !== null && method !== 'GET' && method !== 'HEAD') {
+      headers['Origin'] = o.origin || server.base;
+    }
+
+    const r = http.request({
+      host: '127.0.0.1', port: server.port, method,
+      path: urlPath, headers
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let json = null;
+        try { json = JSON.parse(text); } catch (e) {}
+        resolve({
+          status: res.statusCode, headers: res.headers, text, json,
+          cookie: sessionCookieFrom(res.headers['set-cookie'])
+        });
+      });
+    });
+    r.on('error', (e) => resolve({ status: 0, error: e.message, text: '', json: null }));
+    if (body) r.write(body);
+    r.end();
+  });
+}
+
+function sessionCookieFrom(setCookie) {
+  if (!setCookie) return null;
+  for (const c of setCookie) {
+    if (c.startsWith('keys_sid=')) return c.split(';')[0];
+  }
+  return null;
+}
+
+/** The session cookie a browser context is holding, as Playwright describes it
+ *  — so its attributes (HttpOnly, SameSite, Secure) can be asserted on, not
+ *  only its value. */
+async function sessionCookieObj(ctx, base) {
+  const all = await ctx.cookies(base);
+  return all.filter(c => c.name === 'keys_sid')[0] || null;
+}
+
+/** Wait until the server answers its one never-authenticated route. */
+async function waitForServer(server, timeoutMs) {
+  const until = Date.now() + (timeoutMs || 15000);
+  for (;;) {
+    const res = await req(server, 'GET', '/api/auth/state');
+    if (res.status === 200) return true;
+    if (Date.now() > until) return false;
+    await new Promise(r => setTimeout(r, 120));
+  }
+}
+
+/** The whole accounts file, parsed. Read straight off the disk on purpose: the
+ *  point of the storage checks is what an attacker with the file would find. */
+function readAccountsFile(server) {
+  const file = path.join(server.dir, 'accounts.json');
+  const raw = fs.readFileSync(file, 'utf8');
+  return {
+    raw, file,
+    mode: fs.statSync(file).mode & 0o777,
+    data: JSON.parse(raw)
+  };
 }
 
 /* ---------------------------------------------------------------------------
@@ -232,10 +353,10 @@ async function main() {
   await page.goto(URL, { waitUntil: 'load' });
   await page.waitForTimeout(900);
 
-  /* auth.js holds the boot back until someone signs in, so every check below
-   * runs against an app reached the way a real user reaches it. The gate is
-   * exercised in detail in its own section further down. */
-  await signIn(page);
+  /* file:// is offline mode: no server, no accounts, no gate. auth.js calls
+   * boot() straight away, so the app is simply here. Everything to do with
+   * accounts is exercised against the real server in its own sections at the
+   * end of this file. */
 
   /* ---------------------------------------------------------------- boot -- */
   section('Boot');
@@ -369,12 +490,11 @@ async function main() {
     keptOpen.stillOpen === true && keptOpen.others.length === 1,
     'open: ' + keptOpen.others.join(', '));
 
-  // Clearing localStorage takes the accounts with it, so this lands back on
-  // first-run setup.
+  // A clean slate for the theme checks below: no saved document, no saved
+  // theme choice. Nothing account-shaped lives in localStorage any more.
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(900);
-  await signIn(page);
 
   /* ---------------------------------------------------------------- theme-- */
   section('Light / dark theme');
@@ -512,7 +632,6 @@ async function main() {
   const sysPage = await sysCtx.newPage();
   await sysPage.goto(URL, { waitUntil: 'load' });
   await sysPage.waitForTimeout(700);
-  await signIn(sysPage);
   const sysPick = await sysPage.evaluate(() => ({
     theme: document.documentElement.getAttribute('data-theme'),
     errors: 0
@@ -537,7 +656,6 @@ async function main() {
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
   await page.reload({ waitUntil: 'load' });
   await page.waitForTimeout(800);
-  await signIn(page);
 
   /* -------------------------------------------------- sticky rail headers -- */
   section('Section titles stay put while the rail scrolls');
@@ -3355,823 +3473,1414 @@ async function main() {
     'next-page navigation responded: ' + recovery.wired);
   await page.evaluate(() => { try { localStorage.clear(); } catch (e) {} });
 
-  /* ------------------------------------------------------------ accounts --
-   * Runs in its OWN browser context: these checks create and delete accounts
-   * and sign out (which reloads), so they must not be able to disturb the
-   * state the rest of the suite left behind.
-   *
-   * The framing matters as much as the mechanics here. This gate is not an
-   * access-control boundary — there is no server — and the checks below are
-   * about the two things that ARE true and can be broken by accident:
-   * passwords are never recoverable from storage, and the rules the UI states
-   * are the rules the model actually applies.
+  /* --------------------------------------------------- save-for-later ----
+   * The drawer down the right edge of the preview pane. Runs in its own
+   * context: it writes to a persistent store of its own, and the rest of the
+   * suite must not inherit whatever it leaves behind.
    * ---------------------------------------------------------------------- */
-  section('Accounts — the gate');
+  section('Save-for-later drawer');
 
-  const authCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
-  const auth = await authCtx.newPage();
-  const authErrors = [];
-  auth.on('pageerror', e => authErrors.push(e.message));
-  await auth.goto(URL, { waitUntil: 'load' });
-  await auth.waitForTimeout(900);
+  const stashCtx = await browser.newContext({ viewport: { width: 1500, height: 980 } });
+  const stash = await stashCtx.newPage();
+  const stashErrors = [];
+  stash.on('pageerror', e => stashErrors.push(e.message));
+  await stash.goto(URL, { waitUntil: 'load' });
+  await stash.waitForTimeout(800);
 
-  const ADMIN_PW = 'first-admin-passphrase';
-  const USER_PW = 'ordinary-user-passphrase';
-
-  const locked = await auth.evaluate(() => {
-    const gate = document.getElementById('auth-gate');
+  const drawerClosed = await stash.evaluate(() => {
+    const el = document.getElementById('stash');
+    const handle = document.getElementById('stash-handle');
+    const pane = document.getElementById('preview-pane');
+    const pr = pane.getBoundingClientRect();
+    const hr = handle.getBoundingClientRect();
     return {
-      gateShown: !!gate && !gate.hidden,
-      bodyLocked: document.body.classList.contains('is-locked'),
-      appInert: document.getElementById('app').hasAttribute('inert'),
-      // The strongest form of "hidden": not rendered at all.
-      papers: document.querySelectorAll('#page-stage .paper').length,
-      railFields: document.querySelectorAll('#editor-scroll .rt').length,
-      // Nothing of the newsletter should be readable off the page.
-      bodyMentionsIssue: /Classroom Corner|Walmore/i.test(document.body.innerText),
-      title: document.getElementById('auth-title').textContent,
-      submit: document.getElementById('auth-submit').textContent,
-      confirmShown: !document.getElementById('auth-confirm-field').hidden,
-      hasAccounts: window.Keys.Auth.hasAccounts(),
-      notice: (document.querySelector('.auth-notice') || {}).textContent || ''
+      exists: !!el,
+      insidePreviewPane: !!el.closest('#preview-pane'),
+      open: el.classList.contains('is-open'),
+      // Closed, the panel is clipped away and only the handle is left.
+      panelOffscreen: el.getBoundingClientRect().left >= pr.right - 2,
+      handleOnScreen: hr.right <= pr.right + 1 && hr.left >= pr.left &&
+                      hr.width > 10 && hr.height > 40,
+      handleExpanded: handle.getAttribute('aria-expanded'),
+      // Off-screen controls must be out of the tab order.
+      panelInert: document.getElementById('stash-panel').hasAttribute('inert'),
+      seeded: window.Keys.Stash.count(),
+      names: window.Keys.Stash.items().map(i => i.name)
     };
   });
 
-  check('a first visit is met by the gate', locked.gateShown && locked.bodyLocked,
-    `gate=${locked.gateShown} locked=${locked.bodyLocked}`);
-  check('the newsletter is not rendered behind the gate, only hidden',
-    locked.papers === 0 && locked.railFields === 0 &&
-    locked.bodyMentionsIssue === false,
-    `papers=${locked.papers} fields=${locked.railFields} ` +
-    `text leak=${locked.bodyMentionsIssue}`);
-  check('the app behind it is inert, so nothing there is tabbable',
-    locked.appInert === true);
-  check('with no accounts it offers SETUP, not a sign-in',
-    locked.hasAccounts === false && /set up/i.test(locked.title) &&
-    /create/i.test(locked.submit) && locked.confirmShown === true,
-    `title="${locked.title}" submit="${locked.submit}"`);
+  check('the drawer lives in the preview pane, on its right edge',
+    drawerClosed.exists && drawerClosed.insidePreviewPane,
+    JSON.stringify({ exists: drawerClosed.exists,
+                     inPane: drawerClosed.insidePreviewPane }));
+  check('it starts closed, with only its handle showing',
+    !drawerClosed.open && drawerClosed.panelOffscreen &&
+    drawerClosed.handleOnScreen,
+    JSON.stringify(drawerClosed));
+  check('the closed panel is out of the tab order',
+    drawerClosed.panelInert === true);
+  check('it is pre-populated from the lunch slips page',
+    drawerClosed.seeded === 5, 'items=' + drawerClosed.seeded);
+  /* The seeded names come from multi-line headings; textContent alone runs
+   * them together into an unreadable "THIS THURSDAY, 5/28FOR LUNCHHOTDOG…". */
+  check('seeded names are the first line of each heading, not run together',
+    drawerClosed.names.every(n => n.length <= 45 && !/[a-z][A-Z]{2}/.test(n)) &&
+    drawerClosed.names.indexOf('THIS THURSDAY, 5/28') !== -1,
+    JSON.stringify(drawerClosed.names));
 
-  /* A shipped default account is the classic own-goal. There must be none. */
-  check('the app ships with no built-in account and no default password',
-    locked.hasAccounts === false);
+  // Clicking the handle slides it out.
+  await stash.click('#stash-handle');
+  await stash.waitForTimeout(600);
+  const drawerOpen = await stash.evaluate(() => {
+    const el = document.getElementById('stash');
+    const list = document.getElementById('stash-list');
+    const pane = document.getElementById('preview-pane').getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    return {
+      open: el.classList.contains('is-open'),
+      onScreen: r.right <= pane.right + 2 && r.left < pane.right - 100,
+      expanded: document.getElementById('stash-handle').getAttribute('aria-expanded'),
+      inert: document.getElementById('stash-panel').hasAttribute('inert'),
+      rows: list.children.length,
+      // The list, not the drawer, is what scrolls.
+      listScrolls: getComputedStyle(list).overflowY === 'auto',
+      handleStillVisible:
+        document.getElementById('stash-handle').getBoundingClientRect().width > 10
+    };
+  });
+  check('clicking the handle slides the drawer open',
+    drawerOpen.open && drawerOpen.onScreen && drawerOpen.expanded === 'true',
+    JSON.stringify(drawerOpen));
+  check('opening it puts its controls back in the tab order',
+    drawerOpen.inert === false);
+  check('every saved item is listed, and the list is the part that scrolls',
+    drawerOpen.rows === 5 && drawerOpen.listScrolls === true,
+    `rows=${drawerOpen.rows} overflowY=${drawerOpen.listScrolls}`);
+  check('the handle stays reachable while the drawer is open',
+    drawerOpen.handleStillVisible === true);
 
-  check('the gate says plainly that it is not a security barrier',
-    /not a security barrier/i.test(locked.notice) &&
-    /anyone who can open these files/i.test(locked.notice),
-    JSON.stringify(locked.notice.slice(0, 80)));
+  // Enough items to actually need scrolling.
+  const scrolls = await stash.evaluate(async () => {
+    const S = window.Keys.Stash;
+    const slip = window.Keys.State.doc.slips[0];
+    for (let i = 0; i < 20; i++) S.add('Filler box ' + i, 'slip', slip);
+    await new Promise(r => setTimeout(r, 250));
+    const list = document.getElementById('stash-list');
+    const el = document.getElementById('stash');
+    const pane = document.getElementById('preview-pane').getBoundingClientRect();
+    return {
+      count: S.count(),
+      scrollable: list.scrollHeight > list.clientHeight + 2,
+      // A long list must not push the drawer past the pane.
+      drawerWithinPane: el.getBoundingClientRect().bottom <= pane.bottom + 2
+    };
+  });
+  check('a full drawer scrolls rather than growing past the pane',
+    scrolls.scrollable && scrolls.drawerWithinPane,
+    JSON.stringify(scrolls));
 
-  /* --- password validation --------------------------------------------- */
-  const rejects = await auth.evaluate(async pw => {
-    const A = window.Keys.Auth;
-    const out = {};
-    out.short = (await A.createFirstAdmin('Admin', 'short')).error || null;
-    out.blankName = (await A.createFirstAdmin('   ', pw)).error || null;
-    out.stillNone = A.hasAccounts();
-    return out;
-  }, ADMIN_PW);
-  check('a password under the minimum is refused',
-    /at least 8/i.test(rejects.short || ''), String(rejects.short));
-  check('a blank name is refused', /enter a name/i.test(rejects.blankName || ''),
-    String(rejects.blankName));
-  check('a refused attempt creates nothing', rejects.stillNone === false);
+  const stashCapped = await stash.evaluate(() => {
+    const S = window.Keys.Stash;
+    const slip = window.Keys.State.doc.slips[0];
+    let err = null;
+    for (let i = 0; i < 60 && !err; i++) {
+      const res = S.add('Overflow ' + i, 'slip', slip);
+      if (res.error) err = res.error;
+    }
+    return { err, count: S.count(), max: S.MAX_ITEMS };
+  });
+  check('the drawer is stashCapped, with an explanation rather than silent loss',
+    /full/i.test(stashCapped.err || '') && stashCapped.count === stashCapped.max,
+    `${stashCapped.count}/${stashCapped.max} — ${stashCapped.err}`);
 
-  /* --- create the administrator through the real form ------------------- */
-  await auth.fill('#auth-name', 'Head Teacher');
-  await auth.fill('#auth-password', ADMIN_PW);
-  await auth.fill('#auth-confirm', ADMIN_PW);
-  await auth.click('#auth-submit');
-  await auth.waitForFunction(
-    () => document.querySelectorAll('#page-stage .paper').length > 0,
-    null, { timeout: 10000 });
-  await auth.waitForTimeout(600);
-
-  const afterSetup = await auth.evaluate(() => ({
-    gateHidden: document.getElementById('auth-gate').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    me: window.Keys.Auth.currentUser(),
-    isAdmin: window.Keys.Auth.isAdmin()
+  await stash.evaluate(() => window.Keys.Stash.clear());
+  await stash.waitForTimeout(200);
+  const stashCleared = await stash.evaluate(() => ({
+    count: window.Keys.Stash.count(),
+    emptyShown: !document.getElementById('stash-empty').hidden,
+    countBadgeHidden: document.getElementById('stash-count').hidden
   }));
-  check('creating the administrator opens the newsletter',
-    afterSetup.gateHidden === true && afterSetup.papers === 4,
-    `hidden=${afterSetup.gateHidden} papers=${afterSetup.papers}`);
+  check('an emptied drawer says so and is not silently re-seeded',
+    stashCleared.count === 0 && stashCleared.emptyShown && stashCleared.countBadgeHidden,
+    JSON.stringify(stashCleared));
+
+  /* --- stashing from the editor ----------------------------------------- */
+  const viaButton = await stash.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const sec = document.querySelector(
+      '#editor-scroll .ed-section[data-section="page3"]');
+    sec.classList.add('is-open');
+    await wait(250);
+    const btn = document.querySelector('#editor-scroll [data-act="slip-stash"]');
+    if (!btn) return { error: 'no Save-for-later button on the slip card' };
+    const slipsBefore = window.Keys.State.doc.slips.length;
+    btn.click();
+    await wait(400);
+
+    const dlg = document.getElementById('name-dialog');
+    const snap = {
+      dialogOpen: dlg.open,
+      title: document.getElementById('name-dialog-title').textContent,
+      label: document.getElementById('name-dialog-label').textContent,
+      okLabel: document.getElementById('name-dialog-ok').textContent,
+      suggestion: document.getElementById('name-dialog-input').placeholder,
+      // A stash name is not a file name: no extension chip.
+      extHidden: document.getElementById('name-dialog-ext').hidden
+    };
+    document.getElementById('name-dialog-input').value = 'Hotdog / Thursday: reusable';
+    document.getElementById('name-dialog-form').requestSubmit();
+    await wait(600);
+    return Object.assign(snap, {
+      count: window.Keys.Stash.count(),
+      newest: window.Keys.Stash.items()[0],
+      drawerOpened: window.Keys.Stash.isOpen(),
+      slipsBefore,
+      slipsAfter: window.Keys.State.doc.slips.length
+    });
+  });
+  check('each slip card offers a Save-for-later button',
+    !viaButton.error && viaButton.dialogOpen === true,
+    viaButton.error || 'dialog opened');
+  check('it asks for a name, suggesting the slip heading',
+    /save for later/i.test(viaButton.title) && /name/i.test(viaButton.label) &&
+    viaButton.suggestion && viaButton.suggestion.length > 2,
+    JSON.stringify({ title: viaButton.title, label: viaButton.label,
+                     suggestion: viaButton.suggestion }));
+  check('the name prompt is a name prompt, not the file-name one',
+    viaButton.extHidden === true && /drawer/i.test(viaButton.okLabel),
+    `ext hidden=${viaButton.extHidden} ok="${viaButton.okLabel}"`);
+  check('the typed name is kept verbatim, punctuation and all',
+    viaButton.newest && viaButton.newest.name === 'Hotdog / Thursday: reusable',
+    JSON.stringify(viaButton.newest));
+  check('stashing COPIES — the box stays on the page',
+    viaButton.slipsAfter === viaButton.slipsBefore,
+    `${viaButton.slipsBefore} -> ${viaButton.slipsAfter}`);
+  check('the drawer opens so you can see what was saved',
+    viaButton.drawerOpened === true);
+
+  /* --- stashing by dragging onto the drawer ------------------------------ */
+  const viaDrag = await stash.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    window.Keys.Stash.close();
+    window.Keys.Flip.go(3, { animate: false });
+    await wait(500);
+
+    const slip = document.querySelector(
+      '#page-stage .paper[data-kind="slips"] [data-move="slip"]');
+    if (!slip) return { error: 'no draggable slip on the page' };
+    const sr = slip.getBoundingClientRect();
+    const stage = document.getElementById('page-stage');
+    stage.dispatchEvent(new PointerEvent('pointermove',
+      { bubbles: true, clientX: sr.left + 6, clientY: sr.top + 6 }));
+    slip.dispatchEvent(new PointerEvent('pointermove',
+      { bubbles: true, clientX: sr.left + 6, clientY: sr.top + 6 }));
+    await wait(150);
+
+    const h = document.getElementById('arrange-handle');
+    if (!h || h.hidden) return { error: 'the drag handle did not appear' };
+    const hr = h.getBoundingClientRect();
+    h.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true, button: 0, pointerId: 7,
+      clientX: hr.left + hr.width / 2, clientY: hr.top + hr.height / 2
+    }));
+
+    /* Aim at the HANDLE of a still-closed drawer — the only part of it on
+     * screen, and the part that hangs outside the drawer's own box. */
+    const grip = document.getElementById('stash-handle').getBoundingClientRect();
+    const tx = grip.left + grip.width / 2;
+    const ty = grip.top + grip.height / 2;
+    window.dispatchEvent(new PointerEvent('pointermove',
+      { bubbles: true, pointerId: 7, clientX: tx, clientY: ty - 40 }));
+    window.dispatchEvent(new PointerEvent('pointermove',
+      { bubbles: true, pointerId: 7, clientX: tx, clientY: ty }));
+    await wait(250);
+
+    const midDrag = {
+      litUp: document.getElementById('stash').classList.contains('is-drop-target'),
+      openedOnHover: window.Keys.Stash.isOpen(),
+      indicatorHidden: document.getElementById('arrange-indicator').hidden
+    };
+
+    const slipsBefore = window.Keys.State.doc.slips.length;
+    const countBefore = window.Keys.Stash.count();
+    window.dispatchEvent(new PointerEvent('pointerup',
+      { bubbles: true, pointerId: 7, clientX: tx, clientY: ty }));
+    await wait(500);
+
+    const dialogOpen = document.getElementById('name-dialog').open;
+    document.getElementById('name-dialog-form').requestSubmit();  // take the suggestion
+    await wait(600);
+    return Object.assign(midDrag, {
+      dialogOpen, slipsBefore,
+      slipsAfter: window.Keys.State.doc.slips.length,
+      countBefore, countAfter: window.Keys.Stash.count(),
+      newest: window.Keys.Stash.items()[0].name
+    });
+  });
+
+  check('a slip can be dragged onto the drawer',
+    !viaDrag.error && viaDrag.dialogOpen === true,
+    viaDrag.error || 'dropped and prompted');
+  check('the drawer lights up and slides open as you drag over it',
+    viaDrag.litUp === true && viaDrag.openedOnHover === true,
+    `lit=${viaDrag.litUp} opened=${viaDrag.openedOnHover}`);
+  check('no move indicator is shown — this is a copy, not a reorder',
+    viaDrag.indicatorHidden === true);
+  check('dropping on the drawer asks for a name, like the button does',
+    viaDrag.dialogOpen === true);
+  check('the drag saves a copy and leaves the page untouched',
+    viaDrag.countAfter === viaDrag.countBefore + 1 &&
+    viaDrag.slipsAfter === viaDrag.slipsBefore,
+    JSON.stringify({ stash: `${viaDrag.countBefore}->${viaDrag.countAfter}`,
+                     slips: `${viaDrag.slipsBefore}->${viaDrag.slipsAfter}` }));
+
+  /* --- putting one back -------------------------------------------------- */
+  const stashRestored = await stash.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const before = window.Keys.State.doc.slips.length;
+    const item = window.Keys.Stash.items()[0];
+    document.querySelector(
+      '#stash-list [data-stash="restore"][data-id="' + item.id + '"]').click();
+    await wait(800);
+    const slips = window.Keys.State.doc.slips;
+    return {
+      name: item.name,
+      before, after: slips.length,
+      stillInDrawer: window.Keys.Stash.items().some(i => i.id === item.id),
+      // Two boxes sharing an id would make every delete and reorder ambiguous.
+      uniqueIds: new Set(slips.map(s => s.id)).size === slips.length,
+      onPage: document.querySelectorAll(
+        '#page-stage .paper[data-kind="slips"] .slip').length,
+      wentToSlipsPage: window.Keys.Flip.current() ===
+        window.Keys.Render.ordinalOf('slips')
+    };
+  });
+  check('clicking Add puts a copy back on the lunch slips page',
+    stashRestored.after === stashRestored.before + 1 &&
+    stashRestored.onPage === stashRestored.after,
+    JSON.stringify(stashRestored));
+  check('the restored box gets a fresh id',
+    stashRestored.uniqueIds === true);
+  check('restoring keeps the drawer copy — it is a library, not an outbox',
+    stashRestored.stillInDrawer === true);
+  check('the preview turns to the page it landed on',
+    stashRestored.wentToSlipsPage === true);
+
+  /* --- rename and remove -------------------------------------------------- */
+  const stashRenamed = await stash.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const item = window.Keys.Stash.items()[0];
+    document.querySelector(
+      '#stash-list [data-stash="rename"][data-id="' + item.id + '"]').click();
+    await wait(400);
+    const prefilled = document.getElementById('name-dialog-input').placeholder;
+    document.getElementById('name-dialog-input').value = '   Renamed with spaces   ';
+    document.getElementById('name-dialog-form').requestSubmit();
+    await wait(500);
+    return {
+      prefilled,
+      name: window.Keys.Stash.items()[0].name,
+      shownInDrawer: document.querySelector('#stash-list .stash-item-name').textContent
+    };
+  });
+  check('an item can be renamed, offering its current name',
+    stashRenamed.prefilled && stashRenamed.name === 'Renamed with spaces' &&
+    stashRenamed.shownInDrawer === 'Renamed with spaces',
+    JSON.stringify(stashRenamed));
+
+  const stashRemoved = await stash.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const before = window.Keys.Stash.count();
+    const slipsBefore = window.Keys.State.doc.slips.length;
+    const id = window.Keys.Stash.items()[0].id;
+    const real = window.confirm;
+    window.confirm = () => true;
+    document.querySelector(
+      '#stash-list [data-stash="remove"][data-id="' + id + '"]').click();
+    await wait(400);
+    window.confirm = real;
+    return {
+      before, after: window.Keys.Stash.count(),
+      rows: document.getElementById('stash-list').children.length,
+      slipsUnchanged: window.Keys.State.doc.slips.length === slipsBefore
+    };
+  });
+  check('an item can be removed from the drawer',
+    stashRemoved.after === stashRemoved.before - 1 && stashRemoved.rows === stashRemoved.after,
+    JSON.stringify(stashRemoved));
+  check('removing from the drawer does not touch the newsletter',
+    stashRemoved.slipsUnchanged === true);
+
+  /* --- what the stash is, and is not, part of ---------------------------- */
+  const independence = await stash.evaluate(async () => {
+    const wait = ms => new Promise(r => setTimeout(r, ms));
+    const S = window.Keys.State;
+    const before = window.Keys.Stash.count();
+
+    // The whole point: the drawer outlives the document it was filled from.
+    const json = S.toJSON();
+    const inSaveFile = /stash/i.test(json);
+    S.replace(S.defaultDoc());
+    window.Keys.App.structuralChange(null);
+    await wait(400);
+    return {
+      inSaveFile,
+      survivesLoad: window.Keys.Stash.count() === before,
+      count: window.Keys.Stash.count()
+    };
+  });
+  check('the drawer is NOT written into the newsletter file',
+    independence.inSaveFile === false);
+  /* If it lived in the document, starting next week's issue would empty the
+   * library — which is exactly what "save for later" is for. */
+  check('loading a different newsletter leaves the drawer alone',
+    independence.survivesLoad === true, 'count=' + independence.count);
+
+  await stash.reload({ waitUntil: 'load' });
+  await stash.waitForTimeout(900);
+  const stashAfterReload = await stash.evaluate(() => ({
+    count: window.Keys.Stash.count(),
+    closed: !window.Keys.Stash.isOpen(),
+    rows: document.getElementById('stash-list').children.length
+  }));
+  check('saved items survive a reload, and the drawer starts closed',
+    stashAfterReload.count > 0 && stashAfterReload.closed &&
+    stashAfterReload.rows === stashAfterReload.count,
+    JSON.stringify(stashAfterReload));
+
+  /* --- hostile storage ---------------------------------------------------- */
+  const hostileStash = await stash.evaluate(() => {
+    const S = window.Keys.Stash;
+    const out = {};
+    const set = v => localStorage.setItem(S.STORAGE_KEY, v);
+
+    set('{{{ not json');
+    out.badJson = S.count();
+
+    set(JSON.stringify({ items: 'not a list' }));
+    out.notAList = S.count();
+
+    // Records with no payload, or a kind with no renderer, are dropped:
+    // restoring one would put an unusable object into doc.slips.
+    set(JSON.stringify({ items: [
+      { id: 'a', name: 'No payload', kind: 'slip' },
+      { id: 'b', name: 'Unknown kind', kind: 'spaceship', payload: { x: 1 } },
+      { id: 'c', name: 'Good', kind: 'slip', payload: { type: 'lunch' } }
+    ] }));
+    out.kept = S.items().map(i => i.name);
+    out.rejectedKind = S.add('nope', 'spaceship', { x: 1 }).error || null;
+    return out;
+  });
+  check('unparseable drawer storage is treated as empty, not a crash',
+    hostileStash.badJson === 0 && hostileStash.notAList === 0,
+    JSON.stringify(hostileStash));
+  check('items with no payload or an unknown kind are discarded on read',
+    hostileStash.kept.length === 1 && hostileStash.kept[0] === 'Good',
+    JSON.stringify(hostileStash.kept));
+  check('only stashable kinds can be added',
+    /only lunch-slip/i.test(hostileStash.rejectedKind || ''),
+    String(hostileStash.rejectedKind));
+
+  check('no uncaught errors anywhere in the drawer',
+    stashErrors.length === 0, stashErrors.slice(0, 4).join(' | '));
+
+  await stashCtx.close();
+
+  /* ------------------------------------------------------------- offline --
+   * file:// — "opened straight from disk". There is no server, therefore no
+   * accounts and NO GATE AT ALL; start(boot) calls boot() immediately.
+   *
+   * These checks exist because the honest version of this mode is easy to get
+   * wrong in two opposite directions: putting a local sign-in prompt back
+   * (which protects nothing from someone who already has the files, and lies
+   * about it), or leaving the account-management calls firing fetches at a
+   * server that is not there and hanging the dialog on them.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — opened from disk (offline mode)');
+
+  const offlineCtx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
+  /* Installed before any page script runs, so a fetch issued during boot is
+   * counted too — "does it call the network?" is the question here. */
+  await offlineCtx.addInitScript(() => {
+    window.__fetches = [];
+    const realFetch = window.fetch;
+    window.fetch = function () {
+      window.__fetches.push(String(arguments[0]));
+      return realFetch.apply(this, arguments);
+    };
+  });
+  const offlinePage = await offlineCtx.newPage();
+  const offlineErrors = [];
+  offlinePage.on('pageerror', e => offlineErrors.push(e.message));
+  await offlinePage.goto(URL, { waitUntil: 'load' });
+  await offlinePage.waitForTimeout(900);
+
+  const offlineBoot = await offlinePage.evaluate(() => ({
+    mode: window.Keys.Auth.mode,
+    gateHidden: document.getElementById('auth-gate').hidden,
+    locked: document.body.classList.contains('is-locked'),
+    relocked: document.body.classList.contains('is-relocked'),
+    inert: document.getElementById('app').hasAttribute('inert'),
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    fields: document.querySelectorAll('#editor-scroll .rt').length,
+    notice: (document.querySelector('.auth-notice') || {}).textContent || '',
+    fetches: window.__fetches.slice()
+  }));
+
+  check('a file:// copy boots straight into the editor, with no gate',
+    offlineBoot.gateHidden === true && !offlineBoot.locked &&
+    !offlineBoot.relocked && offlineBoot.inert === false &&
+    offlineBoot.papers === 4 && offlineBoot.fields > 0,
+    JSON.stringify({ gate: offlineBoot.gateHidden, papers: offlineBoot.papers,
+                     inert: offlineBoot.inert }));
+  check('the client calls this mode offline', offlineBoot.mode === 'offline',
+    String(offlineBoot.mode));
+  /* The old copy said "this is not a security barrier". Offline there is no
+   * barrier at all to describe, so the sentence has to be the other honest
+   * one: anyone holding the files can read the newsletter. */
+  check('the offline notice says accounts live on the server, not here',
+    /opened straight from disk/i.test(offlineBoot.notice) &&
+    /anyone who can open these files/i.test(offlineBoot.notice),
+    offlineBoot.notice.slice(0, 90));
+  check('booting offline makes no network requests at all',
+    offlineBoot.fetches.length === 0, offlineBoot.fetches.join(', '));
+
+  const offlineSettings = await offlinePage.evaluate(async () => {
+    window.Keys.Auth.openSettings();
+    await new Promise(r => setTimeout(r, 350));
+    const out = {
+      open: document.getElementById('settings-dialog').open,
+      noteShown: !document.getElementById('settings-offline').hidden,
+      note: document.getElementById('settings-offline').textContent,
+      peopleHidden: document.getElementById('settings-people').hidden,
+      rosterHtml: document.getElementById('settings-user-list').innerHTML,
+      removeButtons: document.querySelectorAll('[data-auth="remove"]').length,
+      who: document.getElementById('settings-who').textContent,
+      heading: document.getElementById('settings-me-h').textContent,
+      signOutHidden: document.getElementById('settings-signout').hidden,
+      passwordHidden: document.getElementById('settings-password-section').hidden
+    };
+    window.Keys.Auth.closeSettings();
+    return out;
+  });
+
+  check('Settings still opens offline — it has other content',
+    offlineSettings.open === true);
+  check('it shows the opened-from-disk note instead of a roster',
+    offlineSettings.noteShown === true &&
+    /opened straight from disk/i.test(offlineSettings.note) &&
+    /no accounts/i.test(offlineSettings.note) &&
+    offlineSettings.peopleHidden === true &&
+    offlineSettings.rosterHtml === '' &&
+    offlineSettings.removeButtons === 0,
+    JSON.stringify({ note: offlineSettings.noteShown,
+                     people: offlineSettings.peopleHidden,
+                     roster: offlineSettings.rosterHtml.length }));
+  check('"Signed in" is not claimed when nobody is or can be',
+    offlineSettings.heading === 'Accounts' &&
+    /opened from disk/i.test(offlineSettings.who) &&
+    offlineSettings.signOutHidden === true &&
+    offlineSettings.passwordHidden === true,
+    `${offlineSettings.heading} / ${offlineSettings.who}`);
+
+  /* A doomed fetch offline is worse than a refusal: it hangs the dialog on a
+   * request nothing will ever answer. Every network-backed call has to decide
+   * locally and resolve { code: 'OFFLINE' }. */
+  const offlineCalls = await offlinePage.evaluate(async () => {
+    const A = window.Keys.Auth;
+    const before = window.__fetches.length;
+    const codes = {};
+    codes.users = (await A.users()).code;
+    codes.signIn = (await A.signIn('Somebody', 'a-long-enough-passphrase')).code;
+    codes.signOut = (await A.signOut()).code;
+    codes.addUser = (await A.addUser('Somebody', 'a-long-enough-passphrase', 'user')).code;
+    codes.removeUser = (await A.removeUser('Somebody')).code;
+    codes.changePassword =
+      (await A.changePassword('a-long-enough-passphrase', 'another-long-passphrase')).code;
+    return {
+      codes,
+      checkIdle: await A.checkIdle(),
+      hasAccounts: await A.hasAccounts(),
+      fetches: window.__fetches.slice(before)
+    };
+  });
+
+  const offlineCodes = Object.keys(offlineCalls.codes)
+    .filter(k => offlineCalls.codes[k] !== 'OFFLINE');
+  check('every account-management call resolves { code: "OFFLINE" }',
+    offlineCodes.length === 0, 'not OFFLINE: ' + JSON.stringify(offlineCalls.codes));
+  check('and none of them issues a fetch nothing will answer',
+    offlineCalls.fetches.length === 0, offlineCalls.fetches.join(', '));
+  check('checkIdle() reports offline rather than inventing a session',
+    offlineCalls.checkIdle === 'offline', String(offlineCalls.checkIdle));
+  check('there are no accounts to have', offlineCalls.hasAccounts === false);
+
+  const offlineDiag = await offlinePage.evaluate(() => window.Keys.Auth.diagnose());
+  check('diagnose() explains the missing gate rather than leaving it a mystery',
+    offlineDiag.mode === 'offline' && offlineDiag.server === null &&
+    offlineDiag.signedIn === false && /opened from disk/i.test(offlineDiag.summary),
+    offlineDiag.summary.slice(0, 90));
+
+  check('no uncaught errors in offline mode', offlineErrors.length === 0,
+    offlineErrors.slice(0, 3).join(' | '));
+
+  await offlineCtx.close();
+
+  /* -------------------------------------------------------------- served --
+   * Everything below runs against the REAL server in server/, started here on
+   * a fresh KEYS_DATA directory, driven through the REAL /setup and /login
+   * pages and the REAL API. Nothing is stubbed and no test bypass is installed;
+   * a harness that wrote a session cookie by hand would leave the only path
+   * anybody actually takes untested.
+   *
+   * Served mode is an access-control boundary, which the file:// mode above is
+   * not, so these checks are allowed to assert something the old browser-only
+   * suite could not: that the newsletter and the code that edits it are NOT
+   * handed to a stranger.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — first run on a fresh server');
+
+  const ADMIN_NAME = 'Head Teacher';
+  const ADMIN_PW = 'first-admin-passphrase';
+  const ADMIN_PW2 = 'a-brand-new-passphrase';
+  const USER_NAME = 'Office Assistant';
+  const USER_PW = 'ordinary-user-passphrase';
+  const DEPUTY_NAME = 'Deputy Head';
+  const DEPUTY_PW = 'deputy-passphrase-here';
+
+  const srv = startServer({});
+  const srvUp = await waitForServer(srv);
+  check('the server starts and answers /api/auth/state', srvUp === true,
+    srvUp ? srv.base : srv.log().slice(0, 400));
+
+  const firstRoot = await req(srv, 'GET', '/');
+  /* §6, and the direct answer to "I cloned it onto a VM and was never prompted
+   * to create an administrator". A fresh box must send you to setup, not to a
+   * sign-in form for an account that does not exist. */
+  check('a first-run visitor is sent to /setup, not to a sign-in form',
+    firstRoot.status === 302 && firstRoot.headers.location === '/setup',
+    firstRoot.status + ' -> ' + firstRoot.headers.location);
+
+  const tokenFile = path.join(srv.dir, 'setup-token.txt');
+  const setupToken = fs.readFileSync(tokenFile, 'utf8').trim();
+  check('the setup token is printed to the console, unmissably',
+    srv.log().includes(setupToken) && /FIRST-RUN SETUP/.test(srv.log()),
+    srv.log().split('\n').filter(l => /Token/.test(l)).join(' '));
+  check('and saved to the data directory, readable only by the server account',
+    (fs.statSync(tokenFile).mode & 0o777) === 0o600,
+    '0' + (fs.statSync(tokenFile).mode & 0o777).toString(8));
+
+  /* The token is what stops the administrator account being claimed by
+   * whoever reaches the box first on a shared network. Without this check the
+   * whole mechanism could be a decoration. */
+  const wrongToken = await req(srv, 'POST', '/api/auth/setup', {
+    json: { token: 'WRNG-WRNG-WRNG-WRNG', name: 'Impostor', password: 'a-good-passphrase' }
+  });
+  check('a wrong setup token is refused',
+    wrongToken.status === 400 && wrongToken.json && wrongToken.json.code === 'BAD_TOKEN',
+    wrongToken.status + ' ' + JSON.stringify(wrongToken.json));
+  const afterWrongToken = await req(srv, 'GET', '/api/auth/state');
+  check('a refused setup creates nothing',
+    afterWrongToken.json.hasAccounts === false,
+    JSON.stringify(afterWrongToken.json && afterWrongToken.json.hasAccounts));
+
+  const noToken = await req(srv, 'POST', '/api/auth/setup', {
+    json: { name: 'Impostor', password: 'a-good-passphrase' }
+  });
+  check('so is a setup with no token at all',
+    noToken.status === 400 && noToken.json.code === 'BAD_TOKEN',
+    noToken.status + ' ' + (noToken.json || {}).code);
+
+  /* --- the administrator, created through the real page ------------------ */
+  const adminCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+  const admin = await adminCtx.newPage();
+  const adminErrors = [];
+  admin.on('pageerror', e => adminErrors.push('pageerror: ' + e.message));
+  admin.on('console', m => { if (m.type() === 'error') adminErrors.push('console: ' + m.text()); });
+
+  await admin.goto(srv.base + '/', { waitUntil: 'domcontentloaded' });
+  check('a browser is redirected to the setup page on a first visit',
+    admin.url().endsWith('/setup'), admin.url());
+
+  await admin.fill('#token', setupToken);
+  await admin.fill('#name', ADMIN_NAME);
+  await admin.fill('#password', ADMIN_PW);
+  await admin.fill('#confirm', ADMIN_PW);
+  await Promise.all([
+    admin.waitForNavigation({ waitUntil: 'load', timeout: 20000 }).catch(() => {}),
+    admin.click('#submit')
+  ]);
+  await admin.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 20000 });
+  await admin.waitForTimeout(700);
+
+  const afterSetup = await admin.evaluate(() => ({
+    path: location.pathname,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    gateHidden: document.getElementById('auth-gate').hidden,
+    mode: window.Keys.Auth.mode,
+    me: window.Keys.Auth.currentUser(),
+    isAdmin: window.Keys.Auth.isAdmin(),
+    notice: (document.querySelector('.auth-notice') || {}).textContent || ''
+  }));
+  check('completing setup opens the newsletter',
+    afterSetup.path === '/' && afterSetup.papers === 4 &&
+    afterSetup.gateHidden === true,
+    JSON.stringify({ path: afterSetup.path, papers: afterSetup.papers }));
   check('the first account is always an administrator',
-    afterSetup.me && afterSetup.me.name === 'Head Teacher' &&
+    afterSetup.me && afterSetup.me.name === ADMIN_NAME &&
     afterSetup.me.role === 'admin' && afterSetup.isAdmin === true,
     JSON.stringify(afterSetup.me));
+  check('the client reports served mode', afterSetup.mode === 'served',
+    String(afterSetup.mode));
+  /* The old "this is not a security barrier" sentence would now be an
+   * understatement, which is its own kind of lie. Served mode says what the
+   * server actually does — and what it still does not do, which is encrypt. */
+  check('the served notice claims a real lock, and admits it is not encryption',
+    /real lock/i.test(afterSetup.notice) && /in the clear/i.test(afterSetup.notice) &&
+    !/not a security barrier/i.test(afterSetup.notice),
+    afterSetup.notice.slice(0, 90));
 
-  /* --- how the password is stored --------------------------------------- */
-  section('Accounts — password storage');
+  const secondSetup = await req(srv, 'POST', '/api/auth/setup', {
+    json: { token: setupToken, name: 'Second Admin', password: 'another-passphrase' }
+  });
+  check('the setup token is consumed — a second setup is refused',
+    secondSetup.status === 403 && secondSetup.json.code === 'SETUP_DONE',
+    secondSetup.status + ' ' + (secondSetup.json || {}).code);
+  check('and the token file is deleted, so a stale copy cannot be replayed',
+    fs.existsSync(tokenFile) === false);
 
-  const stored = await auth.evaluate(pw => {
-    const raw = localStorage.getItem(window.Keys.Auth.ACCOUNTS_KEY);
-    const parsed = JSON.parse(raw);
-    const u = parsed.users[0];
-    // Everything the browser is holding, in one string.
-    let all = '';
-    for (let i = 0; i < localStorage.length; i++) {
-      all += localStorage.key(i) + '=' + localStorage.getItem(localStorage.key(i)) + '\n';
-    }
-    for (let i = 0; i < sessionStorage.length; i++) {
-      all += sessionStorage.key(i) + '=' + sessionStorage.getItem(sessionStorage.key(i)) + '\n';
-    }
-    return {
-      keys: Object.keys(u).sort(),
-      iterations: u.iterations,
-      salt: u.salt,
-      saltBytes: atob(u.salt).length,
-      hashBytes: atob(u.hash).length,
-      plaintextAnywhere: all.indexOf(pw) !== -1,
-      // The public shape must never carry the secret material.
-      publicKeys: Object.keys(window.Keys.Auth.users()[0]).sort(),
-      sessionRaw: sessionStorage.getItem(window.Keys.Auth.SESSION_KEY)
-    };
-  }, ADMIN_PW);
+  const adminCookieObj = await sessionCookieObj(adminCtx, srv.base);
+  const adminCookie = adminCookieObj ? 'keys_sid=' + adminCookieObj.value : '';
+  /* `Secure` over plain http is the trap the server's own comment warns about:
+   * the cookie is stored and then never sent back, so sign-in appears to work,
+   * / bounces to /login, and it looks like an infinite loop with no error
+   * anywhere. It must be set only under TLS. */
+  check('the session cookie is HttpOnly, SameSite=Strict, and not Secure over plain http',
+    !!adminCookieObj && adminCookieObj.httpOnly === true &&
+    adminCookieObj.sameSite === 'Strict' && adminCookieObj.secure === false,
+    JSON.stringify(adminCookieObj && {
+      httpOnly: adminCookieObj.httpOnly, sameSite: adminCookieObj.sameSite,
+      secure: adminCookieObj.secure, path: adminCookieObj.path
+    }));
 
-  check('the password is never stored, anywhere, in the clear',
-    stored.plaintextAnywhere === false);
-  check('it is stored as a salted PBKDF2 hash at the OWASP iteration floor',
-    stored.iterations >= 310000 && stored.saltBytes === 16 &&
-    stored.hashBytes === 32,
-    `iterations=${stored.iterations} salt=${stored.saltBytes}B hash=${stored.hashBytes}B`);
-  check('the stored record carries the parameters needed to verify it',
-    ['hash', 'iterations', 'salt'].every(k => stored.keys.indexOf(k) !== -1),
-    stored.keys.join(', '));
-  check('the public user list never exposes the salt or hash',
-    stored.publicKeys.indexOf('hash') === -1 &&
-    stored.publicKeys.indexOf('salt') === -1,
-    stored.publicKeys.join(', '));
-  check('the session holds only an id, not credentials',
-    !/hash|salt|passphrase/i.test(stored.sessionRaw || ''),
-    String(stored.sessionRaw));
+  /* --- the boundary itself ---------------------------------------------- */
+  section('Accounts — the server will not serve the app to a stranger');
 
-  /* --- sign in / sign out ----------------------------------------------- */
-  section('Accounts — signing in');
+  const anonApp = await req(srv, 'GET', '/assets/js/app.js');
+  /* THE point of moving accounts to a server. A browser-side gate could only
+   * ever hide the editor after shipping it; this refuses to ship it. */
+  check('the application JavaScript is not served without a session',
+    anonApp.status === 401 && anonApp.json && anonApp.json.code === 'NO_SESSION',
+    anonApp.status + ' ' + (anonApp.json || {}).code);
+  const anonAuthJs = await req(srv, 'GET', '/assets/js/auth.js');
+  check('nor is auth.js, which is where the gate would be tampered with',
+    anonAuthJs.status === 401, String(anonAuthJs.status));
 
-  const signInChecks = await auth.evaluate(async ([name, pw]) => {
-    const A = window.Keys.Auth;
-    const out = {};
-    const t0 = performance.now();
-    out.wrongPassword = (await A.signIn(name, 'not-the-password')).error || null;
-    const t1 = performance.now();
-    out.unknownName = (await A.signIn('Nobody At All', pw)).error || null;
-    const t2 = performance.now();
-    out.wrongMs = t1 - t0;
-    out.unknownMs = t2 - t1;
-    const good = await A.signIn(name, pw);
-    out.correct = good.user ? good.user.name : ('ERROR: ' + good.error);
-    return out;
-  }, ['Head Teacher', ADMIN_PW]);
+  const anonRoot = await req(srv, 'GET', '/');
+  check('/ sends a stranger to /login once an account exists',
+    anonRoot.status === 302 && anonRoot.headers.location === '/login',
+    anonRoot.status + ' -> ' + anonRoot.headers.location);
+  const anonIndex = await req(srv, 'GET', '/index.html');
+  check('index.html cannot be fetched by name to go round that',
+    anonIndex.status === 404, String(anonIndex.status));
 
-  check('a wrong password is refused',
-    /do not match/i.test(signInChecks.wrongPassword || ''),
-    String(signInChecks.wrongPassword));
-  check('a correct password is accepted',
-    signInChecks.correct === 'Head Teacher', String(signInChecks.correct));
-  /* Same message AND comparable cost for both, so the reply cannot be used to
-   * work out who has an account. */
-  check('an unknown name is refused with the same message as a wrong password',
-    signInChecks.unknownName === signInChecks.wrongPassword,
-    `unknown="${signInChecks.unknownName}" wrong="${signInChecks.wrongPassword}"`);
-  check('an unknown name still costs a full derivation, so it cannot be timed',
-    signInChecks.unknownMs > signInChecks.wrongMs * 0.4,
-    `wrong=${signInChecks.wrongMs.toFixed(0)}ms unknown=${signInChecks.unknownMs.toFixed(0)}ms`);
+  const anonCss = await req(srv, 'GET', '/assets/css/app.css');
+  check('the one allowlisted stylesheet is served, because /login needs it',
+    anonCss.status === 200 && /text\/css/.test(anonCss.headers['content-type'] || ''),
+    anonCss.status + ' ' + anonCss.headers['content-type']);
 
-  // A reload keeps the session (same tab); a new context must not inherit it.
-  await auth.reload({ waitUntil: 'load' });
-  await auth.waitForTimeout(900);
-  const afterReload = await auth.evaluate(() => ({
-    me: window.Keys.Auth.currentUser(),
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    gateHidden: document.getElementById('auth-gate').hidden
-  }));
-  check('the session survives a reload of the same tab',
-    afterReload.me && afterReload.papers === 4 && afterReload.gateHidden,
-    JSON.stringify(afterReload.me));
+  const anonUsers = await req(srv, 'GET', '/api/users');
+  check('the roster is not served without a session',
+    anonUsers.status === 401 && (anonUsers.json || {}).code === 'NO_SESSION',
+    anonUsers.status + ' ' + (anonUsers.json || {}).code);
 
-  const strangerCtx = await browser.newContext({ viewport: { width: 1200, height: 800 } });
-  const stranger = await strangerCtx.newPage();
-  await stranger.goto(URL, { waitUntil: 'load' });
-  await stranger.waitForTimeout(800);
-  const strangerState = await stranger.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    me: window.Keys.Auth.currentUser()
-  }));
-  check('a different browser profile does not inherit the session',
-    strangerState.gateShown && strangerState.papers === 0 &&
-    strangerState.me === null,
-    JSON.stringify(strangerState));
-  await strangerCtx.close();
+  const anonSetupPage = await req(srv, 'GET', '/setup');
+  check('/setup closes for good once an account exists',
+    anonSetupPage.status === 302 && anonSetupPage.headers.location === '/login',
+    anonSetupPage.status + ' -> ' + anonSetupPage.headers.location);
+
+  /* --- paths that must never resolve ------------------------------------- */
+  const traversals = [
+    ['/assets/../server/server.js', 'a plain ..'],
+    ['/assets/%2e%2e/server/server.js', 'an encoded ..'],
+    ['/assets/js/app.js%00.png', 'a NUL byte'],
+    ['/assets/%5c..%5cserver/server.js', 'a backslash separator'],
+    ['/assets/.env', 'a dotfile under assets'],
+    ['/.git/config', 'the git directory']
+  ];
+  for (const [p, what] of traversals) {
+    // With a VALID session, so this is about the path handling and not about
+    // the auth gate happening to catch it first.
+    const res = await req(srv, 'GET', p, { cookie: adminCookie });
+    check(`a path containing ${what} is refused outright`,
+      res.status === 400, p + ' -> ' + res.status);
+  }
+
+  const neverServed = ['/server/server.js', '/server/accounts.js',
+    '/docs/AUTH-API.md', '/tools/verify.js', '/reference/anything.txt',
+    '/README.md', '/assets/js/../../server/server.js'];
+  for (const p of neverServed) {
+    const res = await req(srv, 'GET', p, { cookie: adminCookie });
+    check(`${p} is never served, even to an administrator`,
+      res.status === 404 || res.status === 400, p + ' -> ' + res.status);
+  }
+
+  /* --- cross-site request forgery ---------------------------------------- */
+  const crossOrigin = await req(srv, 'POST', '/api/auth/signin', {
+    json: { name: ADMIN_NAME, password: ADMIN_PW }, origin: 'http://evil.example'
+  });
+  check('a cross-origin Origin is refused 403 CSRF',
+    crossOrigin.status === 403 && crossOrigin.json.code === 'CSRF',
+    crossOrigin.status + ' ' + (crossOrigin.json || {}).code);
+
+  const noOrigin = await req(srv, 'POST', '/api/auth/signin', {
+    json: { name: ADMIN_NAME, password: ADMIN_PW }, origin: null
+  });
+  /* "Both absent" must be a refusal, not a pass. Browsers always send Origin
+   * on a non-GET; anything that does not is a script, and a script can set the
+   * header. Defaulting to allow is how a CSRF check comes to be worth nothing. */
+  check('a non-GET with no Origin at all is refused too, not given the benefit of the doubt',
+    noOrigin.status === 403 && noOrigin.json.code === 'CSRF',
+    noOrigin.status + ' ' + (noOrigin.json || {}).code);
+
+  const formish = await req(srv, 'POST', '/api/auth/signin', {
+    json: { name: ADMIN_NAME, password: ADMIN_PW },
+    headers: { 'Content-Type': 'text/plain;charset=UTF-8' }
+  });
+  check('a content type an HTML form could actually send is refused',
+    formish.status === 403 && formish.json.code === 'CSRF',
+    formish.status + ' ' + (formish.json || {}).code);
+
+  /* The one place this is easy to get wrong: DELETE has no body, so it is
+   * tempting to exempt it from the content-type leg. It is not exempt. */
+  const deleteNoType = await req(srv, 'DELETE', '/api/users/Nobody',
+    { cookie: adminCookie });
+  check('DELETE is held to the same content-type rule, despite having no body',
+    deleteNoType.status === 403 && deleteNoType.json.code === 'CSRF',
+    deleteNoType.status + ' ' + (deleteNoType.json || {}).code);
 
   /* --- who may do what --------------------------------------------------- */
   section('Accounts — administrator and users');
 
-  const asAdmin = await auth.evaluate(async pw => {
-    const A = window.Keys.Auth;
-    const out = {};
-    out.added = (await A.addUser('Office Assistant', pw, 'user')).user || null;
-    out.addedSecondAdmin = (await A.addUser('Deputy', pw, 'admin')).user || null;
-    out.duplicate = (await A.addUser('office assistant', pw, 'user')).error || null;
-    out.shortPw = (await A.addUser('Someone Else', 'abc', 'user')).error || null;
-    out.names = A.users().map(u => u.name + ':' + u.role);
-    return out;
-  }, USER_PW);
+  const roster0 = await admin.evaluate(() => window.Keys.Auth.users());
+  check('an administrator can read the roster over the real API',
+    roster0.users && roster0.users.length === 1 &&
+    roster0.users[0].name === ADMIN_NAME,
+    JSON.stringify(roster0));
+  check('the roster never carries password material',
+    (roster0.users || []).every(u =>
+      Object.keys(u).sort().join(',') === 'createdAt,lastSignInAt,name,role'),
+    JSON.stringify(Object.keys((roster0.users || [{}])[0] || {})));
 
-  check('an administrator can add people',
-    asAdmin.added && asAdmin.added.role === 'user' &&
-    asAdmin.addedSecondAdmin && asAdmin.addedSecondAdmin.role === 'admin',
-    JSON.stringify(asAdmin.names));
+  const addedUser = await admin.evaluate(
+    a => window.Keys.Auth.addUser(a[0], a[1], 'user'), [USER_NAME, USER_PW]);
+  check('an administrator can add a user',
+    addedUser.user && addedUser.user.name === USER_NAME &&
+    addedUser.user.role === 'user', JSON.stringify(addedUser));
+
+  const dupe = await admin.evaluate(
+    a => window.Keys.Auth.addUser(a[0].toLowerCase(), a[1], 'user'),
+    [USER_NAME, USER_PW]);
   check('a duplicate name is refused, ignoring case',
-    /already called/i.test(asAdmin.duplicate || ''), String(asAdmin.duplicate));
-  check('a short password is refused when adding someone too',
-    /at least 8/i.test(asAdmin.shortPw || ''), String(asAdmin.shortPw));
+    dupe.code === 'NAME_TAKEN' && dupe.status === 409,
+    JSON.stringify(dupe));
 
-  const asUser = await auth.evaluate(async ([userPw, adminName]) => {
-    const A = window.Keys.Auth;
-    const out = {};
-    await A.signIn('Office Assistant', userPw);
-    out.role = A.currentUser().role;
-    out.isAdmin = A.isAdmin();
-    out.addRefused = (await A.addUser('Sneaky', userPw, 'admin')).error || null;
-    const admin = A.users().filter(u => u.name === adminName)[0];
-    out.removeOtherRefused = A.removeUser(admin.id).error || null;
-    out.countAfter = A.users().length;
-    return out;
-  }, [USER_PW, 'Head Teacher']);
+  const weak = await admin.evaluate(() =>
+    window.Keys.Auth.addUser('Someone Else', 'short', 'user'));
+  check('a short password is refused when adding someone',
+    weak.code === 'WEAK_PASSWORD' && /at least 8/i.test(weak.error || ''),
+    JSON.stringify(weak));
 
+  /* The client's own validation lets this through — it only checks length and
+   * emptiness — so this is the SERVER's character rule being exercised, and
+   * the client passing the server's code back unchanged. */
+  const badName = await admin.evaluate(() =>
+    window.Keys.Auth.addUser('Slash/Name', 'a-good-passphrase-here', 'user'));
+  check('a name with characters that are not allowed is refused by the server',
+    badName.code === 'BAD_NAME' && badName.status === 400,
+    JSON.stringify(badName));
+
+  /* A role the server does not recognise must round DOWN to user, never up. */
+  const oddRole = await admin.evaluate(() =>
+    window.Keys.Auth.addUser('Temp Helper', 'temporary-passphrase', 'superuser'));
+  check('an unrecognised role is created as an ordinary user, never an administrator',
+    oddRole.user && oddRole.user.role === 'user', JSON.stringify(oddRole));
+
+  /* Names may legally contain spaces, and the DELETE route puts the name in
+   * the path — so this is the encodeURIComponent round trip as well. */
+  const removedHelper = await admin.evaluate(() =>
+    window.Keys.Auth.removeUser('Temp Helper'));
+  check('an administrator can remove someone, name with a space and all',
+    removedHelper.removed && removedHelper.removed.name === 'Temp Helper' &&
+    removedHelper.self === false, JSON.stringify(removedHelper));
+
+  const gone = await admin.evaluate(() => window.Keys.Auth.users());
+  check('and they are gone from the roster',
+    (gone.users || []).every(u => u.name !== 'Temp Helper'),
+    (gone.users || []).map(u => u.name).join(', '));
+
+  /* --- an ordinary user -------------------------------------------------- */
+  const userCtx = await browser.newContext({ viewport: { width: 1300, height: 900 } });
+  const userPage = await userCtx.newPage();
+  const userErrors = [];
+  const userRequests = [];
+  userPage.on('pageerror', e => userErrors.push('pageerror: ' + e.message));
+  userPage.on('console', m => { if (m.type() === 'error') userErrors.push('console: ' + m.text()); });
+  userPage.on('request', r => userRequests.push(r.url()));
+
+  await userPage.goto(srv.base + '/', { waitUntil: 'domcontentloaded' });
+  await userPage.waitForTimeout(400);
+  check('a browser with no session lands on /login',
+    userPage.url().endsWith('/login'), userPage.url());
+  const atLogin = await userPage.evaluate(() => ({
+    papers: document.querySelectorAll('.paper').length,
+    editor: !!document.getElementById('editor-scroll'),
+    text: document.body.innerText
+  }));
+  check('and none of the newsletter is in that page — it was never sent',
+    atLogin.papers === 0 && !atLogin.editor &&
+    !/Classroom Corner|Walmore/i.test(atLogin.text),
+    JSON.stringify({ papers: atLogin.papers, editor: atLogin.editor }));
+
+  await userPage.fill('#name', USER_NAME);
+  await userPage.fill('#password', USER_PW);
+  await Promise.all([
+    userPage.waitForNavigation({ waitUntil: 'load', timeout: 20000 }).catch(() => {}),
+    userPage.click('#submit')
+  ]);
+  await userPage.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 20000 });
+  await userPage.waitForTimeout(600);
+
+  const userCookieObj = await sessionCookieObj(userCtx, srv.base);
+  const userCookie = userCookieObj ? 'keys_sid=' + userCookieObj.value : '';
+  const asUser = await userPage.evaluate(() => ({
+    me: window.Keys.Auth.currentUser(),
+    isAdmin: window.Keys.Auth.isAdmin(),
+    papers: document.querySelectorAll('#page-stage .paper').length
+  }));
+  check('signing in through the real /login page opens the newsletter',
+    asUser.papers === 4 && asUser.me && asUser.me.name === USER_NAME,
+    JSON.stringify(asUser.me));
   check('an ordinary user is not an administrator',
-    asUser.role === 'user' && asUser.isAdmin === false,
-    `role=${asUser.role}`);
-  check('an ordinary user cannot add people',
-    /only an administrator/i.test(asUser.addRefused || ''),
-    String(asUser.addRefused));
-  check('an ordinary user cannot remove anyone else',
-    /only an administrator/i.test(asUser.removeOtherRefused || ''),
-    String(asUser.removeOtherRefused));
-  check('a refused removal removes nobody', asUser.countAfter === 3,
-    'accounts=' + asUser.countAfter);
+    asUser.me.role === 'user' && asUser.isAdmin === false, asUser.me.role);
 
-  /* The settings panel must not merely refuse — it must not offer it. */
-  const userUi = await auth.evaluate(async () => {
-    window.Keys.Auth.openSettings();
-    await new Promise(r => setTimeout(r, 250));
-    const peopleHidden = document.getElementById('settings-people').hidden;
-    const removeButtons = document.querySelectorAll(
-      '#settings-user-list [data-auth="remove"]').length;
-    const notice = (document.querySelector('.set-notice') || {}).textContent || '';
-    const who = document.getElementById('settings-who').textContent;
-    const role = document.getElementById('settings-role').textContent;
-    window.Keys.Auth.closeSettings();
-    return { peopleHidden, removeButtons, notice, who, role };
+  const userRoster = await userPage.evaluate(async () => {
+    const r = await fetch('/api/users', { credentials: 'same-origin' });
+    return { status: r.status, body: await r.json() };
   });
-  check('a user is not offered the People section at all',
-    userUi.peopleHidden === true && userUi.removeButtons === 0,
-    `hidden=${userUi.peopleHidden} removeButtons=${userUi.removeButtons}`);
-  check('settings names who is signed in and their role',
-    userUi.who === 'Office Assistant' && userUi.role === 'User',
+  check('the server refuses an ordinary user the roster',
+    userRoster.status === 403 && userRoster.body.code === 'NOT_ADMIN',
+    userRoster.status + ' ' + userRoster.body.code);
+
+  const requestsBefore = userRequests.length;
+  const userUi = await userPage.evaluate(async () => {
+    window.Keys.Auth.openSettings();
+    await new Promise(r => setTimeout(r, 600));
+    const out = {
+      open: document.getElementById('settings-dialog').open,
+      peopleHidden: document.getElementById('settings-people').hidden,
+      rosterHtml: document.getElementById('settings-user-list').innerHTML,
+      rosterItems: document.querySelectorAll('#settings-user-list li').length,
+      removeButtons: document.querySelectorAll('[data-auth="remove"]').length,
+      anyOtherName: /Head Teacher/.test(document.getElementById('settings-dialog').innerHTML),
+      who: document.getElementById('settings-who').textContent,
+      role: document.getElementById('settings-role').textContent
+    };
+    window.Keys.Auth.closeSettings();
+    return out;
+  });
+  const askedForRoster = userRequests.slice(requestsBefore)
+    .filter(u => u.indexOf('/api/users') !== -1);
+
+  /* REQUIREMENT WITH HISTORY. An earlier build left the whole people list —
+   * every name, a remove button each — sitting in the DOM of anyone who opened
+   * Settings, merely `hidden`. "Hidden" is one devtools keystroke from
+   * visible. The elements must not be BUILT, and the request that would fetch
+   * the names must not be MADE. */
+  check('a non-administrator never even asks the server for the roster',
+    askedForRoster.length === 0, askedForRoster.join(', '));
+  check('and has no roster markup in the DOM at all — not merely hidden',
+    userUi.rosterHtml === '' && userUi.rosterItems === 0 &&
+    userUi.removeButtons === 0 && userUi.peopleHidden === true &&
+    userUi.anyOtherName === false,
+    JSON.stringify({ html: userUi.rosterHtml.length, items: userUi.rosterItems,
+                     buttons: userUi.removeButtons, hidden: userUi.peopleHidden,
+                     leak: userUi.anyOtherName }));
+  check('settings still names who is signed in, and their role',
+    userUi.who === USER_NAME && userUi.role === 'User',
     `${userUi.who} / ${userUi.role}`);
-  check('settings repeats the honest notice',
-    /not a security barrier/i.test(userUi.notice), userUi.notice.slice(0, 60));
+
+  const userAdds = await userPage.evaluate(() =>
+    window.Keys.Auth.addUser('Sneaky', 'sneaky-passphrase-here', 'admin'));
+  check('an ordinary user cannot add anyone',
+    userAdds.code === 'NOT_ADMIN' && userAdds.status === 403,
+    JSON.stringify(userAdds));
+
+  const userRemovesOther = await userPage.evaluate(
+    n => window.Keys.Auth.removeUser(n), ADMIN_NAME);
+  check('an ordinary user cannot remove anyone else',
+    userRemovesOther.code === 'NOT_ADMIN' && userRemovesOther.status === 403,
+    JSON.stringify(userRemovesOther));
 
   /* --- deleting your own account ----------------------------------------- */
-  const selfDelete = await auth.evaluate(() => {
-    const A = window.Keys.Auth;
-    const me = A.currentUser();
-    const res = A.removeUser(me.id);
-    return {
-      removed: res.removed ? res.removed.name : null,
-      self: res.self,
-      error: res.error || null,
-      sessionAfter: A.currentUser(),
-      names: A.users().map(u => u.name)
-    };
-  });
-  check('a user can delete their own account',
-    selfDelete.removed === 'Office Assistant' && selfDelete.self === true &&
-    selfDelete.names.indexOf('Office Assistant') === -1,
-    JSON.stringify(selfDelete));
-  check('deleting your own account signs you out',
-    selfDelete.sessionAfter === null);
+  const selfDelete = await userPage.evaluate(() =>
+    window.Keys.Auth.removeUser(window.Keys.Auth.currentUser().name));
+  check('a non-administrator can delete their own account',
+    selfDelete.removed && selfDelete.removed.name === USER_NAME &&
+    selfDelete.self === true, JSON.stringify(selfDelete));
+  check('and is signed out by it',
+    (await userPage.evaluate(() => window.Keys.Auth.currentUser())) === null);
 
-  /* --- the last administrator ------------------------------------------- */
+  const deletedTouch = await req(srv, 'POST', '/api/auth/touch',
+    { json: {}, cookie: userCookie });
+  check('the deleted account\'s session is destroyed server-side, not just forgotten locally',
+    deletedTouch.status === 401, deletedTouch.status + ' ' +
+    ((deletedTouch.json || {}).code || ''));
+
+  const rosterAfterSelfDelete = await admin.evaluate(() => window.Keys.Auth.users());
+  check('the administrator sees them gone from the roster',
+    (rosterAfterSelfDelete.users || []).every(u => u.name !== USER_NAME),
+    (rosterAfterSelfDelete.users || []).map(u => u.name).join(', '));
+
+  await userCtx.close();
+
+  /* --- the last administrator -------------------------------------------- */
   section('Accounts — the last administrator');
 
-  const lastAdmin = await auth.evaluate(async ([adminPw, adminName]) => {
-    const A = window.Keys.Auth;
-    const out = {};
-    await A.signIn(adminName, adminPw);
+  /* Without this guard a server can end up with accounts but nobody able to
+   * manage them, and the only way out is reset-accounts.js on the box itself. */
+  const lastAdmin = await admin.evaluate(() =>
+    window.Keys.Auth.removeUser(window.Keys.Auth.currentUser().name));
+  check('the last administrator cannot be removed',
+    lastAdmin.code === 'LAST_ADMIN' && lastAdmin.status === 409,
+    JSON.stringify(lastAdmin));
 
-    // Two admins exist, so removing one is allowed.
-    const deputy = A.users().filter(u => u.name === 'Deputy')[0];
-    out.removedDeputy = A.removeUser(deputy.id).removed ? true : false;
-    out.adminsLeft = A.users().filter(u => u.role === 'admin').length;
+  const stillAdmin = await admin.evaluate(async () => ({
+    roster: await window.Keys.Auth.users(),
+    me: window.Keys.Auth.currentUser()
+  }));
+  check('and is therefore still there, still signed in',
+    stillAdmin.roster.users.length === 1 && stillAdmin.me &&
+    stillAdmin.me.name === ADMIN_NAME,
+    JSON.stringify(stillAdmin.me));
 
-    // Now the signed-in admin is the only one.
-    const me = A.currentUser();
-    out.selfRemoveRefused = A.removeUser(me.id).error || null;
-    out.stillThere = A.users().length;
-    out.stillSignedIn = !!A.currentUser();
-    return out;
-  }, [ADMIN_PW, 'Head Teacher']);
-
-  check('an administrator can be removed while another remains',
-    lastAdmin.removedDeputy === true && lastAdmin.adminsLeft === 1,
-    `adminsLeft=${lastAdmin.adminsLeft}`);
-  /* Without this guard an issue could end up with accounts but nobody able to
-   * manage them, and the only way out would be clearing browser storage —
-   * which throws the newsletter away with it. */
-  check('the last administrator cannot delete themselves',
-    /only administrator/i.test(lastAdmin.selfRemoveRefused || ''),
-    String(lastAdmin.selfRemoveRefused));
-  check('and is therefore still there', lastAdmin.stillThere === 1 &&
-    lastAdmin.stillSignedIn === true);
-
-  const lastAdminUi = await auth.evaluate(async () => {
+  const lastAdminUi = await admin.evaluate(async () => {
     window.Keys.Auth.openSettings();
-    await new Promise(r => setTimeout(r, 250));
+    await new Promise(r => setTimeout(r, 600));
     const out = {
+      rosterItems: document.querySelectorAll('#settings-user-list li').length,
       removeButtons: document.querySelectorAll(
         '#settings-user-list [data-auth="remove"]').length,
       note: (document.querySelector('.set-user-note') || {}).textContent || '',
-      deleteSelfDisabled: document.getElementById('settings-delete-self').disabled
+      you: (document.querySelector('.set-user-you') || {}).textContent || ''
     };
     window.Keys.Auth.closeSettings();
     return out;
   });
-  check('the UI offers no way to remove the last administrator',
-    lastAdminUi.removeButtons === 0 && /last admin/i.test(lastAdminUi.note) &&
-    lastAdminUi.deleteSelfDisabled === true,
+  check('the UI offers no way to remove the last administrator either',
+    lastAdminUi.rosterItems === 1 && lastAdminUi.removeButtons === 0 &&
+    /last admin/i.test(lastAdminUi.note),
     JSON.stringify(lastAdminUi));
+  check('the roster marks which entry is you',
+    /you/i.test(lastAdminUi.you), lastAdminUi.you);
 
-  /* --- changing your password -------------------------------------------- */
+  /* --- changing a password ------------------------------------------------ */
   section('Accounts — changing a password');
 
-  const pwChange = await auth.evaluate(async ([oldPw, newPw]) => {
-    const A = window.Keys.Auth;
-    const out = {};
-    out.wrongCurrent = (await A.changePassword('nope-not-it', newPw)).error || null;
-    out.tooShort = (await A.changePassword(oldPw, 'abc')).error || null;
-    out.changed = (await A.changePassword(oldPw, newPw)).changed || false;
-    out.oldRejected = (await A.signIn('Head Teacher', oldPw)).error || null;
-    const good = await A.signIn('Head Teacher', newPw);
-    out.newAccepted = !!good.user;
-    // A new salt on every change, so two passwords never share one.
-    const store = JSON.parse(localStorage.getItem(A.ACCOUNTS_KEY));
-    out.salt = store.users[0].salt;
-    return out;
-  }, [ADMIN_PW, 'a-brand-new-passphrase']);
+  const saltBefore = readAccountsFile(srv).data.users[0].salt;
 
+  /* A SECOND session for the same person, made the honest way, so that
+   * "every other session is invalidated" can be observed rather than assumed. */
+  const elsewhere = await req(srv, 'POST', '/api/auth/signin',
+    { json: { name: ADMIN_NAME, password: ADMIN_PW } });
+  check('the same person can be signed in in two places at once',
+    elsewhere.status === 200 && !!elsewhere.cookie, String(elsewhere.status));
+
+  const wrongCurrent = await admin.evaluate(
+    a => window.Keys.Auth.changePassword('nope-not-it', a), ADMIN_PW2);
+  /* A 401 here means "you mistyped your current password", NOT "your session
+   * is gone". An earlier build read the status alone, threw the sign-in gate
+   * over the whole app and never mentioned the typo. */
   check('changing a password requires the current one',
-    /not your current password/i.test(pwChange.wrongCurrent || ''),
-    String(pwChange.wrongCurrent));
-  check('the new password must still meet the minimum',
-    /at least 8/i.test(pwChange.tooShort || ''), String(pwChange.tooShort));
-  check('the password changes, and only the new one works afterwards',
-    pwChange.changed === true && pwChange.newAccepted === true &&
-    /do not match/i.test(pwChange.oldRejected || ''),
-    JSON.stringify(pwChange));
-  check('the salt is regenerated on change, not reused',
-    !!pwChange.salt && !!stored.salt && pwChange.salt !== stored.salt,
-    `before=${String(stored.salt).slice(0, 12)}… after=${String(pwChange.salt).slice(0, 12)}…`);
+    wrongCurrent.code === 'BAD_CREDENTIALS' &&
+    /not your current password/i.test(wrongCurrent.error || ''),
+    JSON.stringify(wrongCurrent));
 
-  /* --- the toolbar gear -------------------------------------------------- */
-  section('Accounts — the settings button');
-
-  const gear = await auth.evaluate(() => {
-    const btn = document.querySelector('[data-act="settings"]');
-    const theme = document.querySelector('[data-act="theme"]');
-    if (!btn || !theme) return { missing: true };
-    const kids = [...btn.parentElement.children];
-    return {
-      inToolbar: !!btn.closest('#toolbar'),
-      sameGroupAsTheme: btn.parentElement === theme.parentElement,
-      adjacent: Math.abs(kids.indexOf(btn) - kids.indexOf(theme)) === 1,
-      hasIcon: !!btn.querySelector('svg'),
-      label: btn.getAttribute('aria-label') || '',
-      titled: (btn.getAttribute('title') || '').length > 0
+  /* THE bug this guards, and it happened: the settings code read the 401
+   * ALONE, decided the session was gone, threw the sign-in gate over the whole
+   * app and never mentioned the typo. Only IDLE / EXPIRED / NO_SESSION mean
+   * that. Driven through the real form, because the faulty code was in the
+   * form's handler. */
+  const typoInSettings = await admin.evaluate(async (next) => {
+    window.Keys.Auth.openSettings();
+    await new Promise(r => setTimeout(r, 350));
+    document.getElementById('settings-current-password').value = 'nope-not-it';
+    document.getElementById('settings-next-password').value = next;
+    document.getElementById('settings-next-password-2').value = next;
+    document.getElementById('settings-password-form').dispatchEvent(
+      new Event('submit', { cancelable: true, bubbles: true }));
+    await new Promise(r => setTimeout(r, 1200));
+    const out = {
+      message: document.getElementById('settings-message').textContent,
+      messageShown: !document.getElementById('settings-message').hidden,
+      gateShown: !document.getElementById('auth-gate').hidden,
+      dialogOpen: document.getElementById('settings-dialog').open
     };
-  });
-  check('there is a gear button in the toolbar', !gear.missing && gear.inToolbar &&
-    gear.hasIcon, JSON.stringify(gear));
-  check('it sits directly beside the light/dark theme button',
-    gear.sameGroupAsTheme === true && gear.adjacent === true,
-    `sameGroup=${gear.sameGroupAsTheme} adjacent=${gear.adjacent}`);
-  check('its label names who is signed in',
-    /signed in as/i.test(gear.label) && /administrator/i.test(gear.label),
-    gear.label);
-
-  const gearOpens = await auth.evaluate(async () => {
-    document.querySelector('[data-act="settings"]').click();
-    await new Promise(r => setTimeout(r, 300));
-    const dlg = document.getElementById('settings-dialog');
-    const open = dlg.open;
-    const modal = dlg.matches(':modal');
     window.Keys.Auth.closeSettings();
-    await new Promise(r => setTimeout(r, 200));
-    return { open, modal, closed: !dlg.open };
-  });
-  check('clicking the gear opens settings as a modal, and it closes again',
-    gearOpens.open && gearOpens.modal && gearOpens.closed,
-    JSON.stringify(gearOpens));
+    return out;
+  }, ADMIN_PW2);
+  check('a mistyped current password is reported in Settings, not read as a lapsed session',
+    /not your current password/i.test(typoInSettings.message) &&
+    typoInSettings.messageShown === true &&
+    typoInSettings.gateShown === false && typoInSettings.dialogOpen === true,
+    JSON.stringify(typoInSettings));
 
-  /* --- signing out -------------------------------------------------------- */
-  const signedOut = await auth.evaluate(() => {
-    window.Keys.Auth.signOut();
-    return {
-      me: window.Keys.Auth.currentUser(),
-      session: sessionStorage.getItem(window.Keys.Auth.SESSION_KEY)
-    };
-  });
-  check('signing out clears the session',
-    signedOut.me === null && signedOut.session === null,
-    JSON.stringify(signedOut));
+  const tooShort = await admin.evaluate(
+    a => window.Keys.Auth.changePassword(a, 'abc'), ADMIN_PW);
+  check('the new password must still meet the minimum',
+    tooShort.code === 'WEAK_PASSWORD', JSON.stringify(tooShort));
 
-  await auth.reload({ waitUntil: 'load' });
-  await auth.waitForTimeout(900);
-  const afterSignOut = await auth.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    // Accounts survive; only the session went.
-    hasAccounts: window.Keys.Auth.hasAccounts(),
-    title: document.getElementById('auth-title').textContent,
-    confirmShown: !document.getElementById('auth-confirm-field').hidden
+  const changed = await admin.evaluate(
+    a => window.Keys.Auth.changePassword(a[0], a[1]), [ADMIN_PW, ADMIN_PW2]);
+  check('the password changes', changed.changed === true, JSON.stringify(changed));
+
+  const oldPwNow = await req(srv, 'POST', '/api/auth/signin',
+    { json: { name: ADMIN_NAME, password: ADMIN_PW } });
+  check('the old password stops working',
+    oldPwNow.status === 401 && oldPwNow.json.code === 'BAD_CREDENTIALS',
+    oldPwNow.status + ' ' + (oldPwNow.json || {}).code);
+  const newPwNow = await req(srv, 'POST', '/api/auth/signin',
+    { json: { name: ADMIN_NAME, password: ADMIN_PW2 } });
+  check('and the new one does', newPwNow.status === 200, String(newPwNow.status));
+
+  /* Half the reason anybody changes a password is that they think somebody
+   * else knows it. Leaving that somebody signed in makes the change pointless. */
+  const elsewhereAfter = await req(srv, 'POST', '/api/auth/touch',
+    { json: {}, cookie: elsewhere.cookie });
+  check('every OTHER session for that person is signed out by the change',
+    elsewhereAfter.status === 401, elsewhereAfter.status + ' ' +
+    ((elsewhereAfter.json || {}).code || ''));
+  check('but the session that made the change is kept',
+    (await admin.evaluate(() => window.Keys.Auth.checkIdle())) === 'active');
+
+  const saltAfter = readAccountsFile(srv).data.users[0].salt;
+  /* Reusing the salt would mean the old and the new hash are relatable, and
+   * anyone with both copies of the file could tell the password changed. */
+  check('the salt is rotated on change, not reused',
+    !!saltBefore && !!saltAfter && saltBefore !== saltAfter,
+    `before=${String(saltBefore).slice(0, 12)}… after=${String(saltAfter).slice(0, 12)}…`);
+
+  /* --- how the password is stored ----------------------------------------- */
+  section('Accounts — password storage on disk');
+
+  const deputy = await admin.evaluate(
+    a => window.Keys.Auth.addUser(a[0], a[1], 'admin'), [DEPUTY_NAME, DEPUTY_PW]);
+  check('a second administrator can be added',
+    deputy.user && deputy.user.role === 'admin', JSON.stringify(deputy));
+
+  const store = readAccountsFile(srv);
+  const records = store.data.users;
+  const secrets = [ADMIN_PW, ADMIN_PW2, USER_PW, DEPUTY_PW];
+
+  check('accounts.json is readable only by the account running the server',
+    store.mode === 0o600, '0' + store.mode.toString(8));
+  check('no password appears in the file in the clear',
+    secrets.every(pw => store.raw.indexOf(pw) === -1),
+    secrets.filter(pw => store.raw.indexOf(pw) !== -1).join(', '));
+  check('every record has a salt of its own',
+    records.length === 2 &&
+    new Set(records.map(u => u.salt)).size === records.length &&
+    records.every(u => Buffer.from(u.salt, 'base64').length === 16),
+    records.map(u => String(u.salt).slice(0, 8)).join(' / '));
+  check('hashed at the OWASP iteration floor of 310,000',
+    records.every(u => u.iterations === 310000),
+    records.map(u => u.iterations).join(', '));
+  check('with a 32-byte derived key',
+    records.every(u => Buffer.from(u.hash, 'base64').length === 32),
+    records.map(u => Buffer.from(u.hash, 'base64').length).join(', '));
+
+  /* --- rate limiting ------------------------------------------------------ */
+  section('Accounts — repeated wrong passwords');
+
+  /* Keyed on (IP, name), so this burns the budget for DEPUTY_NAME only —
+   * deliberately somebody the rest of the suite never signs in as. */
+  let limited = null;
+  let attempts = 0;
+  for (let i = 0; i < 10 && !limited; i++) {
+    attempts++;
+    const r = await req(srv, 'POST', '/api/auth/signin',
+      { json: { name: DEPUTY_NAME, password: 'definitely-not-it-' + i } });
+    if (r.status === 429) limited = r;
+  }
+  check('repeated wrong passwords are eventually refused outright',
+    !!limited && limited.json.code === 'RATE_LIMITED',
+    'gave up after ' + attempts + ' attempts');
+  check('the five free attempts are not spent on the first mistake',
+    attempts > 5, 'brake engaged on attempt ' + attempts);
+  check('and the refusal says how long to wait, in the body and in a header',
+    !!limited && limited.json.retryAfterMs > 0 && !!limited.headers['retry-after'],
+    limited ? `retryAfterMs=${limited.json.retryAfterMs} Retry-After=${limited.headers['retry-after']}` : '');
+
+  /* The UI half. A person who is being throttled and is only ever told "that
+   * name and password do not match" will try harder and make it worse. */
+  const rlCtx = await browser.newContext({ viewport: { width: 1000, height: 800 } });
+  const rlPage = await rlCtx.newPage();
+  await rlPage.goto(srv.base + '/login', { waitUntil: 'domcontentloaded' });
+  await rlPage.waitForTimeout(300);
+  let rlMessage = '';
+  for (let i = 0; i < 10; i++) {
+    await rlPage.fill('#name', DEPUTY_NAME);
+    await rlPage.fill('#password', 'still-not-it-' + i);
+    await rlPage.click('#submit');
+    await rlPage.waitForTimeout(400);
+    rlMessage = await rlPage.evaluate(() =>
+      document.getElementById('error').textContent || '');
+    if (/too many/i.test(rlMessage)) break;
+  }
+  check('the sign-in page shows the rate limit, rather than repeating "wrong password"',
+    /too many/i.test(rlMessage) && /try again in/i.test(rlMessage),
+    rlMessage.slice(0, 100));
+  await rlCtx.close();
+
+  /* --- signing out --------------------------------------------------------- */
+  section('Accounts — signing out');
+
+  /* Auth.signOut() deliberately does NOT clear the screen — a rendered
+   * newsletter is still on display when it resolves. The Settings button is
+   * what follows it with a reload, which the server bounces to /login, and
+   * that is the only way to be certain nothing is left visible. So this drives
+   * the BUTTON, not the API. */
+  await admin.evaluate(() => window.Keys.Auth.openSettings());
+  await admin.waitForTimeout(400);
+  await admin.click('[data-auth="signout"]');
+  await admin.waitForTimeout(3000);
+
+  check('the Sign out button reloads, and the server sends the reload to /login',
+    admin.url().indexOf('/login') !== -1, admin.url());
+  const afterSignOut = await admin.evaluate(() => ({
+    papers: document.querySelectorAll('.paper').length,
+    editor: !!document.getElementById('editor-scroll'),
+    text: document.body.innerText
   }));
-  check('after signing out the gate returns and the newsletter is not rendered',
-    afterSignOut.gateShown && afterSignOut.papers === 0,
-    JSON.stringify(afterSignOut));
-  check('it now asks to SIGN IN rather than to set up',
-    afterSignOut.hasAccounts === true && /sign in/i.test(afterSignOut.title) &&
-    afterSignOut.confirmShown === false,
-    `title="${afterSignOut.title}"`);
+  check('nothing of the newsletter is left on the screen',
+    afterSignOut.papers === 0 && !afterSignOut.editor &&
+    !/Classroom Corner|Walmore/i.test(afterSignOut.text),
+    JSON.stringify({ papers: afterSignOut.papers, editor: afterSignOut.editor }));
 
-  /* --- idle timeout ------------------------------------------------------
-   * Five minutes of INACTIVITY. The checks wind the session's `lastSeen` back
-   * and run the real check, rather than the timeout being shortened for the
-   * tests — a constant only tests use is a constant nobody verifies.
+  const cookieAfterSignOut = await req(srv, 'POST', '/api/auth/touch',
+    { json: {}, cookie: adminCookie });
+  check('the session is destroyed server-side, not merely forgotten by the browser',
+    cookieAfterSignOut.status === 401, cookieAfterSignOut.status + ' ' +
+    ((cookieAfterSignOut.json || {}).code || ''));
+
+  /* 400/401/403/409/429 are all provoked on purpose above and the browser logs
+   * every refused fetch to the console regardless. Only count what is not a
+   * deliberate refusal. */
+  const REFUSALS = /status of (400|401|403|404|409|413|429)/;
+  const realAdminErrors = adminErrors.filter(e => !REFUSALS.test(e));
+  const realUserErrors = userErrors.filter(e => !REFUSALS.test(e));
+  check('no unexpected page or console errors in the served flow',
+    realAdminErrors.length === 0 && realUserErrors.length === 0,
+    realAdminErrors.concat(realUserErrors).slice(0, 4).join(' | '));
+
+  await adminCtx.close();
+  await srv.stop();
+
+  /* ------------------------------------------------------------ idle ------
+   * THE highest-value check in this file.
+   *
+   * When the session lapses, the editor is holding an issue that may never
+   * have been on disk. The old browser build reloaded on idle; served, a
+   * reload is bounced to /login and the tab goes with it. Losing somebody's
+   * unsaved newsletter to a five-minute timeout would be the worst possible
+   * failure of this feature, so what is asserted here is not "the session
+   * ended" but "the session ended AND the document is still there".
+   *
+   * Run against a server with a four-second idle budget, so the real
+   * server-side clock is exercised rather than a constant only tests use.
    * ---------------------------------------------------------------------- */
-  section('Accounts — signed out after 5 minutes idle');
+  section('Accounts — an idle session re-locks in place, losing nothing');
 
-  await auth.fill('#auth-name', 'Head Teacher');
-  await auth.fill('#auth-password', 'a-brand-new-passphrase');
-  await auth.click('#auth-submit');
-  await auth.waitForFunction(
+  const idleSrv = startServer({ KEYS_IDLE_MS: '4000' });
+  const idleUp = await waitForServer(idleSrv);
+  check('a server with a four-second idle budget starts', idleUp === true,
+    idleUp ? idleSrv.base : idleSrv.log().slice(0, 400));
+
+  const idleToken = fs.readFileSync(
+    path.join(idleSrv.dir, 'setup-token.txt'), 'utf8').trim();
+
+  const idleCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+  const idlePage = await idleCtx.newPage();
+  const idleErrors = [];
+  idlePage.on('pageerror', e => idleErrors.push('pageerror: ' + e.message));
+  idlePage.on('console', m => { if (m.type() === 'error') idleErrors.push('console: ' + m.text()); });
+
+  await idlePage.goto(idleSrv.base + '/', { waitUntil: 'domcontentloaded' });
+  await idlePage.fill('#token', idleToken);
+  await idlePage.fill('#name', ADMIN_NAME);
+  await idlePage.fill('#password', ADMIN_PW);
+  await idlePage.fill('#confirm', ADMIN_PW);
+  await Promise.all([
+    idlePage.waitForNavigation({ waitUntil: 'load', timeout: 20000 }).catch(() => {}),
+    idlePage.click('#submit')
+  ]);
+  await idlePage.waitForFunction(
     () => document.querySelectorAll('#page-stage .paper').length > 0,
-    null, { timeout: 10000 });
-  await auth.waitForTimeout(600);
+    null, { timeout: 20000 });
+  await idlePage.waitForTimeout(700);
 
-  const idleConst = await auth.evaluate(() => window.Keys.Auth.IDLE_MS);
-  check('the idle timeout is five minutes', idleConst === 5 * 60 * 1000,
-    idleConst + 'ms');
+  const idleCookieObj = await sessionCookieObj(idleCtx, idleSrv.base);
+  const idleCookie = idleCookieObj ? 'keys_sid=' + idleCookieObj.value : '';
 
-  /** Wind the session's last-activity stamp back by `ms` and run the check. */
-  const windBack = (ms) => auth.evaluate(back => {
-    const k = window.Keys.Auth.SESSION_KEY;
-    const s = JSON.parse(sessionStorage.getItem(k));
-    s.lastSeen = Date.now() - back;
-    sessionStorage.setItem(k, JSON.stringify(s));
-    return window.Keys.Auth.checkIdle();
-  }, ms);
+  /* The published constant must be the server's number, not the client's
+   * default — a UI that quotes five minutes while the server enforces four
+   * seconds is worse than one that quotes nothing. */
+  check('the client adopts the server\'s idle budget rather than its own default',
+    (await idlePage.evaluate(() => window.Keys.Auth.IDLE_MS)) === 4000,
+    String(await idlePage.evaluate(() => window.Keys.Auth.IDLE_MS)));
 
-  check('a session that has just been used is active',
-    (await auth.evaluate(() => window.Keys.Auth.checkIdle())) === 'active');
-  check('four minutes of idling is not enough to be signed out',
-    (await windBack(4 * 60 * 1000)) === 'active');
+  /* GET /api/auth/state must NOT refresh lastSeen. If it did, every
+   * visibilitychange, focus and online probe would be a keepalive and the
+   * timeout would never fire for a tab that is merely open. */
+  const probe = await idlePage.evaluate(async () => {
+    const a = await fetch('/api/auth/state', { credentials: 'same-origin' }).then(r => r.json());
+    await new Promise(r => setTimeout(r, 1200));
+    const b = await fetch('/api/auth/state', { credentials: 'same-origin' }).then(r => r.json());
+    return { a: a.signedIn, b: b.signedIn };
+  });
+  check('asking "am I still signed in?" does not answer "yes" by the act of asking',
+    probe.a === true && probe.b === true, JSON.stringify(probe));
 
-  const warned = await auth.evaluate(async back => {
-    const k = window.Keys.Auth.SESSION_KEY;
-    const s = JSON.parse(sessionStorage.getItem(k));
-    s.lastSeen = Date.now() - back;
-    sessionStorage.setItem(k, JSON.stringify(s));
-    document.querySelectorAll('#toasts .toast').forEach(t => t.remove());
-    const result = window.Keys.Auth.checkIdle();
-    await new Promise(r => setTimeout(r, 120));
+  /* Work in progress, typed the way a person types it — through the editor
+   * field, so the preview holds it too. Nobody has pressed Save. This is the
+   * thing the whole in-place re-auth exists to protect. */
+  await idlePage.evaluate(async () => {
+    const el = document.querySelector('#editor-scroll .rt[data-path="masthead.motto"]');
+    el.focus();
+    el.innerHTML = 'TYPED BUT NOT SAVED BY HAND';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 200));
+    window.Keys.State.dirty = true;
+    el.blur();
+  });
+  await idlePage.waitForTimeout(300);
+
+  console.log('    \x1b[90m(waiting out the 4s idle window with no activity…)\x1b[0m');
+  await idlePage.waitForTimeout(7000);
+
+  /* Server-side first: the clock is the server's, and it must say WHY. A
+   * generic refusal would leave the gate telling the person "the server no
+   * longer recognises this session" when the truthful, reassuring answer is
+   * "you stepped away". */
+  const idleTouch = await req(idleSrv, 'POST', '/api/auth/touch',
+    { json: {}, cookie: idleCookie });
+  check('the server closes an idle session and says IDLE, not just "no"',
+    idleTouch.status === 401 && (idleTouch.json || {}).code === 'IDLE',
+    idleTouch.status + ' ' + ((idleTouch.json || {}).code || ''));
+  check('and the sentence it sends is one a person can act on',
+    /signed out after a spell without activity/i.test((idleTouch.json || {}).error || '') &&
+    /saved/i.test((idleTouch.json || {}).error || ''),
+    String((idleTouch.json || {}).error || '').slice(0, 90));
+
+  const dropped = await idlePage.evaluate(async () => {
+    const verdict = await window.Keys.Auth.checkIdle();
+    await new Promise(r => setTimeout(r, 800));
+    const gate = document.getElementById('auth-gate');
     return {
-      result,
-      toast: [...document.querySelectorAll('#toasts .toast')]
-        .map(t => t.textContent).join(' | '),
-      stillSignedIn: !!window.Keys.Auth.currentUser()
+      verdict,
+      gateShown: !!gate && !gate.hidden,
+      relocked: document.body.classList.contains('is-relocked'),
+      blanked: document.body.classList.contains('is-locked'),
+      inert: document.getElementById('app').hasAttribute('inert'),
+      sheets: document.querySelectorAll('#page-stage .paper').length,
+      fields: document.querySelectorAll('#editor-scroll .rt').length,
+      path: location.pathname,
+      title: document.getElementById('auth-title').textContent,
+      note: document.getElementById('auth-note').textContent,
+      noteShown: !document.getElementById('auth-note').hidden,
+      nameFilled: document.getElementById('auth-name').value,
+      motto: window.Keys.State.get('masthead.motto'),
+      saved: (JSON.parse(localStorage.getItem(window.Keys.State.STORAGE_KEY) || '{}')
+        .masthead || {}).motto,
+      signedIn: !!window.Keys.Auth.currentUser()
     };
-  }, 5 * 60 * 1000 - 20000);
-  check('the last half-minute warns instead of signing straight out',
-    warned.result === 'warning' && warned.stillSignedIn === true &&
-    /signed out in about/i.test(warned.toast),
-    JSON.stringify(warned));
-
-  // Real activity, through the real listeners, must reset the clock.
-  await auth.mouse.move(500, 400);
-  await auth.mouse.move(520, 420);
-  await auth.waitForTimeout(200);
-  check('moving the mouse cancels the warning and restores a full five minutes',
-    (await auth.evaluate(() => window.Keys.Auth.checkIdle())) === 'active');
-
-  /* The forced reload must not be stoppable by the browser's "leave site?"
-   * prompt. That prompt fires whenever State.dirty is set, and it would leave
-   * the tab signed in with the newsletter on screen — precisely the situation
-   * the timeout exists to prevent. */
-  let blockingDialogs = 0;
-  const countDialog = async d => { blockingDialogs++; await d.dismiss(); };
-  auth.on('dialog', countDialog);
-
-  await auth.evaluate(() => {
-    window.Keys.State.set('masthead.motto', 'TYPED BUT NOT SAVED BY HAND');
-    window.Keys.State.dirty = true;      // as if mid-edit
   });
 
-  await auth.evaluate(back => {
-    const k = window.Keys.Auth.SESSION_KEY;
-    const s = JSON.parse(sessionStorage.getItem(k));
-    s.lastSeen = Date.now() - back;
-    sessionStorage.setItem(k, JSON.stringify(s));
-    window.Keys.Auth.checkIdle();
-  }, 5 * 60 * 1000 + 1000);
+  check('a lapsed session is noticed',
+    /expired|idle|no session/i.test(String(dropped.verdict)) &&
+    dropped.signedIn === false, String(dropped.verdict));
+  check('the gate comes back up IN PLACE, not as a fresh boot',
+    dropped.gateShown === true && dropped.relocked === true &&
+    dropped.blanked === false,
+    JSON.stringify({ gate: dropped.gateShown, relocked: dropped.relocked,
+                     locked: dropped.blanked }));
+  /* The one that matters. is-locked would display:none the whole app; this
+   * path must leave it laid out, scroll positions and all, so signing back in
+   * does not feel like a reload. */
+  check('the four sheets are STILL IN THE DOM behind the gate',
+    dropped.sheets === 4 && dropped.fields > 0,
+    `sheets=${dropped.sheets} fields=${dropped.fields}`);
+  check('no navigation happened — the tab is still on the app',
+    dropped.path === '/' && dropped.path !== '/login', dropped.path);
+  check('the app is made inert, so nothing behind the gate is tabbable',
+    dropped.inert === true);
+  check('the issue was saved before the gate went up, so nothing is at risk',
+    dropped.motto === 'TYPED BUT NOT SAVED BY HAND' &&
+    dropped.saved === 'TYPED BUT NOT SAVED BY HAND',
+    `in memory=${dropped.motto} autosaved=${dropped.saved}`);
+  /* "Sign in again", not "Sign in": the difference is the difference between
+   * an interruption and a fault. And the reassurance has to be there, because
+   * the first thing anybody wants to know is whether they lost the issue. */
+  check('it asks to sign in AGAIN, and promises nothing is lost',
+    /sign in again/i.test(dropped.title) && dropped.noteShown === true &&
+    /session/i.test(dropped.note) && /Nothing is lost/i.test(dropped.note),
+    `"${dropped.title}" — ${dropped.note.slice(0, 80)}`);
+  /* The name is remembered because it authorises nothing — the server rechecks
+   * both fields — and typing it again is pure friction for somebody who is
+   * trying to get back to a half-finished sentence. */
+  check('the name is already filled in, so only a password has to be typed',
+    dropped.nameFilled === ADMIN_NAME, dropped.nameFilled);
 
-  await auth.waitForFunction(
-    () => !document.getElementById('auth-gate').hidden,
-    null, { timeout: 10000 });
-  await auth.waitForTimeout(700);
-  auth.off('dialog', countDialog);
+  await idlePage.fill('#auth-password', ADMIN_PW);
+  await idlePage.click('#auth-submit');
+  await idlePage.waitForFunction(
+    () => document.getElementById('auth-gate').hidden === true,
+    null, { timeout: 15000 });
+  await idlePage.waitForTimeout(600);
 
-  const expired = await auth.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    signedIn: !!window.Keys.Auth.currentUser(),
-    session: sessionStorage.getItem(window.Keys.Auth.SESSION_KEY),
-    title: document.getElementById('auth-title').textContent,
-    note: document.getElementById('auth-note').textContent,
-    noteShown: !document.getElementById('auth-note').hidden,
-    // The app is not booted at the gate, so State.doc is the seed. What
-    // matters is that the edit reached the autosave before the reload.
-    savedMotto: (JSON.parse(
-      localStorage.getItem(window.Keys.State.STORAGE_KEY) || '{}'
-    ).masthead || {}).motto
-  }));
-
-  check('going over five minutes signs the user out and re-locks the app',
-    expired.gateShown && expired.papers === 0 && !expired.signedIn &&
-    expired.session === null,
-    JSON.stringify({ gate: expired.gateShown, papers: expired.papers,
-                     signedIn: expired.signedIn }));
-  check('they are asked to sign in again with their credentials',
-    /sign in/i.test(expired.title), expired.title);
-  check('and told why, so it does not read as a fault',
-    expired.noteShown && /5 minutes without activity/i.test(expired.note),
-    expired.note);
-  check('the "leave site?" prompt cannot block the automatic sign-out',
-    blockingDialogs === 0, blockingDialogs + ' dialog(s) intercepted the reload');
-  check('work in progress is saved before the sign-out, not lost',
-    expired.savedMotto === 'TYPED BUT NOT SAVED BY HAND',
-    'autosaved motto: ' + expired.savedMotto);
-
-  // The explanation is one-shot: it must not greet them on every later visit.
-  await auth.reload({ waitUntil: 'load' });
-  await auth.waitForTimeout(800);
-  check('the explanation shows once, not on every later visit',
-    (await auth.evaluate(() => document.getElementById('auth-note').hidden)) === true);
-
-  // Signing back in must return the work.
-  await auth.fill('#auth-name', 'Head Teacher');
-  await auth.fill('#auth-password', 'a-brand-new-passphrase');
-  await auth.click('#auth-submit');
-  await auth.waitForFunction(
-    () => document.querySelectorAll('#page-stage .paper').length > 0,
-    null, { timeout: 10000 });
-  await auth.waitForTimeout(700);
-  const resumed = await auth.evaluate(() => ({
+  const resumed = await idlePage.evaluate(() => ({
+    gateHidden: document.getElementById('auth-gate').hidden,
+    relocked: document.body.classList.contains('is-relocked'),
+    inert: document.getElementById('app').hasAttribute('inert'),
+    sheets: document.querySelectorAll('#page-stage .paper').length,
+    path: location.pathname,
     motto: window.Keys.State.get('masthead.motto'),
     onPage: (document.querySelector(
       '#page-stage [data-bind="masthead.motto"]') || {}).textContent,
-    idle: window.Keys.Auth.checkIdle()
+    me: (window.Keys.Auth.currentUser() || {}).name
   }));
-  check('signing back in restores the newsletter exactly as it was',
+
+  check('signing in again dismisses the gate',
+    resumed.gateHidden === true && resumed.relocked === false &&
+    resumed.inert === false, JSON.stringify(resumed));
+  check('the same document is still loaded — no reload, nothing retyped',
+    resumed.sheets === 4 && resumed.path === '/' &&
     resumed.motto === 'TYPED BUT NOT SAVED BY HAND' &&
     resumed.onPage === 'TYPED BUT NOT SAVED BY HAND',
-    JSON.stringify(resumed));
-  check('the new session starts with a full idle budget',
-    resumed.idle === 'active', resumed.idle);
+    JSON.stringify({ sheets: resumed.sheets, path: resumed.path,
+                     motto: resumed.motto, onPage: resumed.onPage }));
+  check('and identity is restored', resumed.me === ADMIN_NAME, String(resumed.me));
 
-  /* The timer is not the only enforcement: a tab that was asleep (or whose
-   * timers were throttled to a crawl while backgrounded) must still be signed
-   * out on the way back in, from the stored stamp alone. */
-  await auth.evaluate(back => {
-    const k = window.Keys.Auth.SESSION_KEY;
-    const s = JSON.parse(sessionStorage.getItem(k));
-    s.lastSeen = Date.now() - back;
-    sessionStorage.setItem(k, JSON.stringify(s));
-  }, 5 * 60 * 1000 + 5000);
-  await auth.reload({ waitUntil: 'load' });
-  await auth.waitForTimeout(900);
-  const staleOnLoad = await auth.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    note: document.getElementById('auth-note').textContent
-  }));
-  check('an idle session is refused on load too, not only by the timer',
-    staleOnLoad.gateShown && staleOnLoad.papers === 0 &&
-    /without activity/i.test(staleOnLoad.note),
-    JSON.stringify(staleOnLoad));
+  const realIdleErrors = idleErrors.filter(e => !REFUSALS.test(e));
+  check('no unexpected page or console errors through the whole lapse',
+    realIdleErrors.length === 0, realIdleErrors.slice(0, 4).join(' | '));
 
-  /* --- a corrupt account store ------------------------------------------- */
-  section('Accounts — corrupt or hostile storage');
-
-  const corrupt = await auth.evaluate(async () => {
-    const A = window.Keys.Auth;
-    const out = {};
-    const set = v => localStorage.setItem(A.ACCOUNTS_KEY, v);
-
-    set('{ not json at all');
-    out.badJson = A.users().length;
-
-    set(JSON.stringify({ version: 1, users: 'not-a-list' }));
-    out.notAList = A.users().length;
-
-    // Records missing the material needed to verify a password are dropped
-    // rather than trusted — a record with no hash must never let anyone in.
-    set(JSON.stringify({ version: 1, users: [
-      { id: 'x', name: 'No Hash', role: 'admin' },
-      { id: 'y', name: 'Bad Role', role: 'superuser', salt: 'AA==', hash: 'AA==', iterations: 1 },
-      { id: 'z', name: 'Zero Iters', role: 'admin', salt: 'AA==', hash: 'AA==', iterations: 0 }
-    ] }));
-    out.partial = A.users().length;
-    out.signInWithNoHash = (await A.signIn('No Hash', '')).error || null;
-
-    localStorage.removeItem(A.ACCOUNTS_KEY);
-    return out;
-  });
-  check('unparseable account storage is treated as no accounts, not a crash',
-    corrupt.badJson === 0 && corrupt.notAList === 0,
-    `badJson=${corrupt.badJson} notAList=${corrupt.notAList}`);
-  check('records without usable hash material are discarded',
-    corrupt.partial === 0, 'kept ' + corrupt.partial);
-  check('a record with no hash cannot be signed into',
-    /do not match/i.test(corrupt.signInWithNoHash || ''),
-    String(corrupt.signInWithNoHash));
-
-  await auth.reload({ waitUntil: 'load' });
-  await auth.waitForTimeout(900);
-  const afterWipe = await auth.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    firstRun: !window.Keys.Auth.hasAccounts(),
-    title: document.getElementById('auth-title').textContent
-  }));
-  check('losing the accounts falls back to setup, never to an open door',
-    afterWipe.gateShown && afterWipe.firstRun && /set up/i.test(afterWipe.title),
-    JSON.stringify(afterWipe));
-
-  check('no uncaught errors anywhere in the accounts flow',
-    authErrors.length === 0, authErrors.slice(0, 4).join(' | '));
-
-  await authCtx.close();
-
-  /* ---------------------------------------------------- insecure context --
-   * The failure mode that matters on a server. `crypto.subtle` only exists in
-   * a SECURE CONTEXT: https://, localhost, or a file opened from disk. Serve
-   * the site over plain http:// on a VM and it disappears — so the gate has to
-   * stand down, and the whole feature silently vanishes.
-   *
-   * That silence was a real defect: the explanation lived inside the gate, and
-   * the gate was then hidden, so a deployment with accounts switched off
-   * looked identical to accounts being broken. These checks pin the loud
-   * behaviour down.
-   *
-   * `crypto.subtle` is removed before any page script runs, which reproduces
-   * the condition exactly and without needing a non-loopback address (every
-   * 127.0.0.0/8 address counts as localhost, so a local server cannot
-   * reproduce it).
-   * ---------------------------------------------------------------------- */
-  section('Accounts — served without a secure context');
-
-  const insecureCtx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
-  await insecureCtx.addInitScript(() => {
-    /* Both halves of the real condition, not just the one that breaks things:
-     * on plain http:// the browser reports an insecure context AND withholds
-     * crypto.subtle. Stubbing only `subtle` would leave diagnose() reporting a
-     * secure context, which is not the state anyone will actually hit. */
-    Object.defineProperty(window, 'isSecureContext',
-      { get: () => false, configurable: true });
-    Object.defineProperty(window.crypto, 'subtle',
-      { get: () => undefined, configurable: true });
-  });
-  const insecure = await insecureCtx.newPage();
-  const insecureWarnings = [];
-  const insecureErrors = [];
-  insecure.on('console', m => {
-    if (m.type() === 'warning') insecureWarnings.push(m.text());
-  });
-  insecure.on('pageerror', e => insecureErrors.push(e.message));
-  await insecure.goto(URL, { waitUntil: 'load' });
-  await insecure.waitForTimeout(900);
-
-  const degraded = await insecure.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    degradedShown: !document.getElementById('auth-degraded').hidden,
-    formHidden: document.getElementById('auth-form').hidden,
-    title: document.getElementById('auth-title').textContent,
-    text: document.getElementById('auth-degraded').textContent,
-    continueButton: !!document.querySelector('[data-auth="continue"]'),
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    diagnosis: window.Keys.Auth.diagnose()
-  }));
-
-  check('accounts switching themselves off is announced, not silent',
-    degraded.gateShown && degraded.degradedShown && degraded.formHidden,
-    JSON.stringify({ gate: degraded.gateShown, notice: degraded.degradedShown,
-                     form: degraded.formHidden }));
-  check('the notice names the cause and the fix',
-    /secure context/i.test(degraded.text) && /https/i.test(degraded.text) &&
-    /localhost/i.test(degraded.text),
-    degraded.text.replace(/\s+/g, ' ').slice(0, 100));
-  check('diagnose() explains it for whoever is looking at a console',
-    /not in a secure context/i.test(degraded.diagnosis.summary) &&
-    degraded.diagnosis.cryptoSubtle === false &&
-    degraded.diagnosis.secureContext === false,
-    degraded.diagnosis.summary);
-  check('and it is logged, since a server admin is usually in devtools',
-    insecureWarnings.some(w => /secure context/i.test(w)),
-    insecureWarnings.slice(0, 2).join(' | '));
-
-  // It must not brick the tool: one click and the newsletter is usable.
-  await insecure.click('[data-auth="continue"]');
-  await insecure.waitForFunction(
-    () => document.querySelectorAll('#page-stage .paper').length > 0,
-    null, { timeout: 10000 });
-  const continued = await insecure.evaluate(() => ({
-    gateHidden: document.getElementById('auth-gate').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length,
-    appInert: document.getElementById('app').hasAttribute('inert')
-  }));
-  check('the newsletter is still usable without accounts',
-    continued.gateHidden && continued.papers === 4 && !continued.appInert,
-    JSON.stringify(continued));
-  check('no uncaught errors with accounts switched off',
-    insecureErrors.length === 0, insecureErrors.slice(0, 3).join(' | '));
-
-  await insecureCtx.close();
-
-  /* --------------------------------------------------- setup diagnostics --
-   * "It never asked me to create an administrator." Every way that can happen
-   * has to be answerable without guessing.
-   * ---------------------------------------------------------------------- */
-  section('Accounts — first-run diagnostics and reset');
-
-  const diagCtx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
-  const diag = await diagCtx.newPage();
-  await diag.goto(URL, { waitUntil: 'load' });
-  await diag.waitForTimeout(800);
-
-  const freshDiag = await diag.evaluate(() => window.Keys.Auth.diagnose());
-  check('on a fresh install diagnose() says setup should be showing',
-    /No accounts yet/i.test(freshDiag.summary) && freshDiag.accounts === 0 &&
-    freshDiag.secureContext === true && freshDiag.cryptoSubtle === true,
-    freshDiag.summary);
-  check('it reports the storage, protocol and idle timeout too',
-    freshDiag.localStorage === 'ok' && !!freshDiag.protocol &&
-    freshDiag.idleTimeoutMinutes === 5,
-    JSON.stringify(freshDiag));
-
-  await signIn(diag);
-  const signedInDiag = await diag.evaluate(() => window.Keys.Auth.diagnose());
-  check('once signed in it says so, rather than looking broken',
-    /Already signed in/i.test(signedInDiag.summary) &&
-    signedInDiag.signedIn === true && signedInDiag.accounts === 1,
-    signedInDiag.summary);
-
-  /* The documented way out of "nobody can get in any more". */
-  const afterReset = await diag.evaluate(() => {
-    const S = window.Keys.State;
-    S.set('masthead.title', 'SURVIVES THE ACCOUNT RESET');
-    S.autosave();
-    const message = window.Keys.Auth.resetAllAccounts();
-    return {
-      message,
-      accounts: window.Keys.Auth.users().length,
-      signedIn: !!window.Keys.Auth.currentUser(),
-      newsletterStillSaved: (JSON.parse(
-        localStorage.getItem(S.STORAGE_KEY) || '{}').masthead || {}).title
-    };
-  });
-  check('resetAllAccounts() clears every account and the session',
-    afterReset.accounts === 0 && afterReset.signedIn === false,
-    JSON.stringify(afterReset));
-  check('it does NOT touch the newsletter',
-    afterReset.newsletterStillSaved === 'SURVIVES THE ACCOUNT RESET',
-    String(afterReset.newsletterStillSaved));
-  check('and it says what to do next',
-    /reload/i.test(afterReset.message), afterReset.message);
-
-  await diag.reload({ waitUntil: 'load' });
-  await diag.waitForTimeout(900);
-  const backToSetup = await diag.evaluate(() => ({
-    gateShown: !document.getElementById('auth-gate').hidden,
-    title: document.getElementById('auth-title').textContent,
-    confirmShown: !document.getElementById('auth-confirm-field').hidden,
-    papers: document.querySelectorAll('#page-stage .paper').length
-  }));
-  check('the next load runs first-time setup again',
-    backToSetup.gateShown && /set up/i.test(backToSetup.title) &&
-    backToSetup.confirmShown && backToSetup.papers === 0,
-    JSON.stringify(backToSetup));
-
-  await diagCtx.close();
+  await idleCtx.close();
+  await idleSrv.stop();
 
   /* ---------------------------------------------------------------- shots--
    * Screenshots and the PDF must show a PRISTINE document. The tests above
@@ -4187,7 +4896,6 @@ async function main() {
     clean.on('pageerror', e => cleanErrors.push(e.message));
     await clean.goto(URL, { waitUntil: 'load' });
     await clean.waitForTimeout(900);
-    await signIn(clean);
 
     const seeded = await clean.evaluate(() => ({
       title: (document.querySelector('#page-stage [data-bind="masthead.title"]') || {}).textContent,
@@ -4355,6 +5063,10 @@ async function main() {
   }
 
   await browser.close();
+  /* Belt and braces: each served section stops its own server, but a run that
+   * bailed out early may have left one. Only ever the processes this file
+   * spawned — nothing else on the machine is signalled. */
+  await stopAllServers();
 
   /* --------------------------------------------------------------- report-- */
   console.log('\n' + '─'.repeat(64));
@@ -4372,4 +5084,8 @@ async function main() {
   process.exit(failures.length ? 1 : 0);
 }
 
-main().catch(e => { console.error(e); process.exit(2); });
+main().catch(async e => {
+  console.error(e);
+  await stopAllServers().catch(() => {});
+  process.exit(2);
+});

@@ -547,16 +547,35 @@
     return s || fallback;
   }
 
-  /** Ask for a file name.
+  /** Trim a plain label — a stash name, not a file name. Deliberately
+   *  permissive: the only things that matter are that it is not blank and not
+   *  absurdly long, because it is never handed to a filesystem. */
+  function cleanLabel(name, fallback) {
+    var s = String(name == null ? '' : name)
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 60)
+      .trim();
+    return s || fallback;
+  }
+
+  /** Ask for a name.
    *
    *  Resolves with the cleaned name, or null if the user cancelled — callers
    *  must treat null as "do nothing", not as "use the default".
    *
-   *  opts: { title, note, ext, okLabel, suggestion } */
+   *  One dialog serves the file-name prompts and the stash. Everything that
+   *  differs is an option, so there is a single focus/settle/escape
+   *  implementation to get right rather than one per caller.
+   *
+   *  opts: { title, note, label, ext, okLabel, suggestion, clean } */
   var nameDialogDone = null;
+  var nameDialogClean = null;
 
-  function askFilename(opts) {
-    var suggestion = cleanFilename(opts.suggestion, 'newsletter');
+  function askName(opts) {
+    var clean = opts.clean || cleanFilename;
+    var suggestion = clean(opts.suggestion, opts.fallback || 'untitled');
     var ext = opts.ext || '';
 
     return new Promise(function (resolve) {
@@ -565,8 +584,9 @@
       // No <dialog> support: fall back to the platform prompt. Here the
       // suggestion has to be the value, since there is no placeholder.
       if (!dlg || typeof dlg.showModal !== 'function') {
-        var typed = global.prompt(opts.title + ' — file name', suggestion);
-        resolve(typed === null ? null : cleanFilename(typed, suggestion));
+        var typed = global.prompt(opts.title + ' — ' +
+          (opts.label || 'name'), suggestion);
+        resolve(typed === null ? null : clean(typed, suggestion));
         return;
       }
 
@@ -578,10 +598,13 @@
        * previous caller this dialog's answer. Settle the old one first. */
       if (nameDialogDone) nameDialogDone(null);
 
+      nameDialogClean = clean;
       var input = $('#name-dialog-input');
       $('#name-dialog-title').textContent = opts.title;
       $('#name-dialog-note').textContent = opts.note || '';
+      $('#name-dialog-label').textContent = opts.label || 'File name';
       $('#name-dialog-ext').textContent = ext;
+      $('#name-dialog-ext').hidden = !ext;
       $('#name-dialog-ok').textContent = opts.okLabel || 'Save';
       input.value = '';                     // empty: the suggestion is the
       input.placeholder = suggestion;       // placeholder, so Enter accepts it
@@ -609,7 +632,8 @@
     form.addEventListener('submit', function (e) {
       e.preventDefault();
       // Blank means "accept the suggestion", which is the placeholder.
-      dlg.returnValue = cleanFilename(input.value, input.placeholder);
+      dlg.returnValue = (nameDialogClean || cleanFilename)(
+        input.value, input.placeholder);
       dlg.close();
     });
 
@@ -635,6 +659,15 @@
   /* -------------------------------------------------------------------------
    * Save / load / print
    * ---------------------------------------------------------------------- */
+  /** The file-name flavour of askName. */
+  function askFilename(opts) {
+    return askName({
+      title: opts.title, note: opts.note, ext: opts.ext,
+      okLabel: opts.okLabel, suggestion: opts.suggestion,
+      label: 'File name', clean: cleanFilename, fallback: 'newsletter'
+    });
+  }
+
   function saveFile() {
     askFilename({
       title: 'Save newsletter',
@@ -1112,6 +1145,12 @@
       var act = btn.getAttribute('data-act');
 
       switch (act) {
+        /* Must be matched here, above the generic `slip-*` block below:
+         * stashing is not a slip mutation, and slipAction would treat it as an
+         * unknown action and silently do nothing. */
+        case 'slip-stash':
+          if (Keys.Stash) Keys.Stash.stashSlip(btn.getAttribute('data-id'));
+          return;
         case 'save': saveFile(); return;
         case 'load': $('#load-input').click(); return;
         case 'pdf': printDoc(); return;
@@ -1262,6 +1301,7 @@
     buildThumbs();
     markEmpties();
     syncTemplateSelect();
+    if (Keys.Stash) Keys.Stash.init();
     onPageChange(Keys.Flip ? Keys.Flip.current() : 1);
     if (Keys.Fit) Keys.Fit.refitAll();
     if (Keys.Arrange) Keys.Arrange.init();
@@ -1325,6 +1365,8 @@
     restoreAfterPrint: restoreAfterPrint,
     saveFile: saveFile,
     printDoc: printDoc,
+    askName: askName,
+    cleanLabel: cleanLabel,
     writeSaveFile: writeSaveFile,
     askFilename: askFilename,
     suggestedName: suggestedName,

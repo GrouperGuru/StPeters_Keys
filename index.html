@@ -205,6 +205,51 @@
         </div>
       </div>
       <nav id="thumb-rail" aria-label="Go to page"><!-- built by app.js --></nav>
+
+      <!-- =============================================================
+           Save-for-later drawer. Absolutely positioned inside the preview
+           pane, which is `position: relative; overflow: hidden`, so the
+           closed drawer is clipped away and only its handle shows.
+           Contents are built by stash.js.
+           ============================================================= -->
+      <aside id="stash" class="stash" aria-label="Saved for later">
+        <button type="button" class="stash-handle" id="stash-handle"
+                aria-expanded="false" aria-controls="stash-panel"
+                title="Saved for later">
+          <span class="stash-handle-grip" aria-hidden="true"></span>
+          <span class="stash-handle-label">Saved for later</span>
+          <span class="stash-handle-count" id="stash-count" hidden>0</span>
+        </button>
+
+        <div class="stash-panel" id="stash-panel" inert>
+          <header class="stash-head">
+            <h2 class="stash-title">Saved for later</h2>
+            <button type="button" class="stash-btn stash-btn--icon"
+                    data-stash="close" title="Close the drawer"
+                    aria-label="Close the drawer">&#10005;</button>
+          </header>
+
+          <p class="stash-lead">
+            Keep a copy of a lunch slip or form here and drop it into a future
+            issue. Drag a box from the page onto this drawer, or use
+            <strong>Save for later</strong> on the box in the editor.
+          </p>
+
+          <ul class="stash-list" id="stash-list"></ul>
+
+          <p class="stash-empty" id="stash-empty" hidden>
+            The drawer is empty. Save a box from the
+            <strong>Lunch Slips and Forms</strong> section and it will appear
+            here.
+          </p>
+
+          <p class="stash-foot">
+            Saved boxes live in this browser, so they stay put when you start a
+            new issue &mdash; but they do not travel with a saved
+            <code>.json</code>.
+          </p>
+        </div>
+      </aside>
     </section>
 
   </main>
@@ -212,14 +257,25 @@
 
 <!-- =====================================================================
      Sign-in gate.
-     Sits OUTSIDE #app and covers it. app.js does not boot until this is
-     cleared, so while it is up the newsletter is not merely hidden — it has
-     not been rendered at all.
 
-     The notice is not boilerplate. There is no server behind this app, so the
-     gate is a shared-computer lock and not a security barrier; saying so where
-     people will read it is the difference between a useful convenience and a
-     false assurance somebody trusts with confidential information.
+     Sits OUTSIDE #app and covers it. It is NOT the front door any more: the
+     server refuses to send this page, or the app's JavaScript, without a
+     valid session, so in served mode a stranger never gets far enough to see
+     this. First-run setup lives on the server too, at /setup, behind a
+     one-time token.
+
+     What is left is the case that matters most — the session lapsing after
+     five minutes idle while an issue is open in the editor. Then this overlay
+     goes back up over the running app and signs the same person back in IN
+     PLACE: no navigation to /login, no reload, nothing retyped. auth.js calls
+     that the 'reauth' kind; the 'boot' kind (app not started yet) is the rare
+     leftover, e.g. a page restored from the back/forward cache.
+
+     Opened from disk (file://) there is no server, no accounts and no gate at
+     all, and this element simply never appears.
+
+     The notice is not boilerplate and is filled in by auth.js, because the
+     truthful sentence is different in each mode. See auth.js.
      ===================================================================== -->
 <div id="auth-gate" hidden>
   <div class="auth-card" role="dialog" aria-modal="true" aria-labelledby="auth-title">
@@ -235,30 +291,14 @@
     <h1 class="auth-title" id="auth-title">Sign in to St. Peter&rsquo;s Keys</h1>
     <p class="auth-lead" id="auth-lead"></p>
 
-    <!-- Shown INSTEAD of the form when crypto.subtle is unavailable, i.e. the
-         page is not in a secure context. Serving over plain http:// on a
-         server is the usual cause, and the symptom is otherwise just "it
-         never asks me to sign in", so this has to be loud. -->
-    <div class="auth-degraded" id="auth-degraded" hidden>
-      <p>
-        <strong>Accounts are switched off here.</strong> Passwords cannot be
-        checked, because this page is not in a <em>secure context</em> — the
-        browser only allows the necessary cryptography over
-        <code>https://</code>, on <code>localhost</code>, or when the file is
-        opened directly from disk.
-      </p>
-      <p>
-        Serve the site over HTTPS (or reach it through an SSH tunnel on
-        <code>localhost</code>) and the sign-in will come back by itself.
-        Nothing has been lost.
-      </p>
-      <button type="button" class="tb-btn auth-submit" data-auth="continue">
-        Continue without signing in
-      </button>
-    </div>
-
+    <!-- Why you are looking at this: an idle timeout, or a server with no
+         accounts yet. Informational, not an error. -->
     <p class="auth-note" id="auth-note" hidden></p>
 
+    <!-- Sign-in only. There is no "create the first account" branch here any
+         more: the server owns first-run setup at /setup, gated by a one-time
+         token, so the administrator account cannot be claimed by whoever
+         reaches the machine first on a shared network. -->
     <form id="auth-form" novalidate>
       <div class="auth-field">
         <label class="auth-label" for="auth-name">Name</label>
@@ -270,13 +310,6 @@
         <label class="auth-label" for="auth-password">Password</label>
         <input class="auth-input" id="auth-password" type="password"
                autocomplete="current-password" required>
-        <p class="auth-hint" id="auth-hint"></p>
-      </div>
-
-      <div class="auth-field" id="auth-confirm-field" hidden>
-        <label class="auth-label" for="auth-confirm">Password again</label>
-        <input class="auth-input" id="auth-confirm" type="password"
-               autocomplete="new-password">
       </div>
 
       <p class="auth-error" id="auth-error" role="alert" hidden></p>
@@ -300,16 +333,28 @@
               title="Close" aria-label="Close settings">&#10005;</button>
     </div>
 
+    <!-- Plain http:// to a host that is not this machine. Filled in and
+         un-hidden by auth.js: Settings is where passwords get typed, so it is
+         the right place to say that they are crossing the network in the
+         clear. -->
+    <p class="set-warn" id="settings-insecure" hidden></p>
+
     <section class="set-section">
-      <h3 class="set-h">Signed in</h3>
+      <h3 class="set-h" id="settings-me-h">Signed in</h3>
       <div class="set-me">
         <span class="set-me-name" id="settings-who"></span>
         <span class="set-me-role" id="settings-role"></span>
-        <button type="button" class="ed-btn" data-auth="signout">Sign out</button>
+        <button type="button" class="ed-btn" id="settings-signout"
+                data-auth="signout">Sign out</button>
       </div>
     </section>
 
-    <section class="set-section">
+    <!-- Opened from disk: there is no server, so there are no accounts to
+         show and no forms that could do anything. Shown INSTEAD of the roster
+         and the forms below, which auth.js hides. -->
+    <p class="set-offline" id="settings-offline" hidden></p>
+
+    <section class="set-section" id="settings-password-section">
       <h3 class="set-h">Your password</h3>
       <form id="settings-password-form" class="set-form">
         <label class="set-label" for="settings-current-password">Current password</label>
@@ -325,7 +370,9 @@
       </form>
     </section>
 
-    <!-- Administrators only; hidden outright for everyone else. -->
+    <!-- Administrators only. Not merely hidden for everyone else: auth.js
+         never builds the roster or asks the server for it, and GET /api/users
+         answers 403 to a non-administrator in any case. -->
     <section class="set-section" id="settings-people" hidden>
       <h3 class="set-h">People</h3>
       <ul class="set-users" id="settings-user-list"></ul>
@@ -344,7 +391,7 @@
       </form>
     </section>
 
-    <section class="set-section">
+    <section class="set-section" id="settings-account-section">
       <h3 class="set-h">Your account</h3>
       <button type="button" class="ed-btn ed-btn--danger"
               id="settings-delete-self" data-auth="delete-self">
@@ -370,7 +417,7 @@
   <form id="name-dialog-form" class="dlg-form">
     <h2 class="dlg-title" id="name-dialog-title">Save newsletter</h2>
     <p class="dlg-note" id="name-dialog-note"></p>
-    <label class="dlg-label" for="name-dialog-input">File name</label>
+    <label class="dlg-label" id="name-dialog-label" for="name-dialog-input">File name</label>
     <div class="dlg-inputwrap">
       <input type="text" id="name-dialog-input" class="dlg-input"
              autocomplete="off" spellcheck="false"
@@ -403,6 +450,7 @@
 <script src="assets/js/render.js"></script>
 <script src="assets/js/arrange.js"></script>
 <script src="assets/js/editor.js"></script>
+<script src="assets/js/stash.js"></script>
 <!-- Before app.js: app.js hands Auth the boot decision, so the newsletter is
      never rendered while the gate is up. -->
 <script src="assets/js/auth.js"></script>

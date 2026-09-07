@@ -829,6 +829,8 @@
             { 'data-id': id, disabled: index === total - 1 ? 'disabled' : null },
             'slip-btn--icon', 'Move down', '↓') +
         columnSwitchHTML(id, col) +
+        btn('slip-stash', { 'data-id': id }, 'slip-btn--icon',
+            'Save this box to the drawer for later', '\u2913') +
         btn('slip-dup', { 'data-id': id }, 'slip-btn--icon', 'Duplicate', '⧉') +
         btn('slip-del', { 'data-id': id }, 'slip-btn--icon slip-btn--danger',
             'Delete this box', '✕') +

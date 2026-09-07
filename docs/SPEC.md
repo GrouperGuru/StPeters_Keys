@@ -8,15 +8,26 @@ depend on them by string.
 
 - **Vanilla JS, classic scripts, no build step, no `type="module"`.** The app must
   work when `index.html` is opened over `file://`. ES modules are blocked by CORS
-  on `file://` — do not use `import`/`export`.
-- **No external network requests.** No CDN fonts, no CDN libraries. Everything
-  ships in-repo.
+  on `file://` — do not use `import`/`export`. This is not a legacy constraint:
+  `file://` is one of the app's two supported modes (§12).
+- **No third-party network requests.** No CDN fonts, no CDN libraries, no
+  telemetry. Everything ships in-repo. The single exception is `auth.js`, which
+  talks to **its own origin** — `/api/auth/*` and `/api/users` on the server
+  that served the page (§14), and never anywhere else. Nothing may be fetched
+  from a host the user did not open.
 - Every module attaches itself to the `window.Keys` namespace:
   `Keys.State`, `Keys.Fit`, `Keys.Flip`, `Keys.Calendar`, `Keys.Slips`,
-  `Keys.Arrange`, `Keys.Render`, `Keys.Editor`, `Keys.Auth`, `Keys.App`.
+  `Keys.Arrange`, `Keys.Render`, `Keys.Editor`, `Keys.Stash`, `Keys.Auth`,
+  `Keys.App`.
+  The `server/` tree (§14) is **not** part of this namespace and shares no code
+  with it: it is Node, CommonJS, and runs in a different process. The only
+  contract between them is `docs/AUTH-API.md`.
 - Script load order (already wired in `index.html`):
-  `state.js → fit.js → flip.js → calendar.js → slips.js → arrange.js → render.js → editor.js → auth.js → app.js`
+  `state.js → fit.js → flip.js → calendar.js → slips.js → arrange.js → render.js → editor.js → stash.js → auth.js → app.js`
   `auth.js` must precede `app.js`: app.js hands it the boot decision (§12).
+  The order did not change when accounts moved to the server; what `auth.js`
+  *does* with that decision changed entirely, so do not assume §12 still says
+  what you remember.
   A module may reference another module's functions **only inside functions that
   run after `DOMContentLoaded`**, never at top level.
 - Target: current Chrome/Edge/Safari/Firefox. `document.execCommand` is used for
@@ -993,6 +1004,16 @@ add-a-box toolbar in the slips section), `.thumb` / `.thumb.is-active` /
 `.thumb-num`, `.toast` / `.toast--ok` / `.toast--err`,
 `.rt.is-focused`, `.ed-section.is-open`, `body.is-collapsed-rail`.
 
+Sign-in and Settings chrome: `.auth-card` / `-brand` / `-title` / `-lead` /
+`-note` / `-field` / `-label` / `-input` / `-error` / `-submit` / `-notice`,
+`.set-h` / `-me` / `-me-name` / `-me-role` / `-section` / `-form` / `-label` /
+`-users` / `-user` / `-user-name` / `-user-you` / `-user-role` / `-user-note` /
+`-msg` (`--ok`, `--err`) / `-notice`, plus `.set-warn` (plain-http),
+`.set-offline` (`file://`), and the two body classes `body.is-locked` and
+`body.is-relocked` (§12, *Markup*). `.auth-degraded` and `.auth-hint` are in
+`app.css` but are **not** used by `index.html` — see `docs/CLASSES.md` before
+deleting them.
+
 ## 10. Verification
 
 `npm`-free Playwright harness lives at `tools/verify.js` (run by the integrator).
@@ -1003,31 +1024,77 @@ Every module is expected to pass:
 - add/remove slip round-trips,
 - save → load round-trip equality,
 - page-turn leaves exactly one visible page and no stuck transforms,
-- the sign-in gate holds the boot back, and the account rules in §12 hold.
+- the re-entry gate holds the boot back on the `'boot'` path, re-authenticates
+  **in place** on the `'reauth'` path without losing an unsaved issue, and the
+  account rules in §12/§14 hold.
 
-## 12. `auth.js` — accounts and the sign-in gate  → `Keys.Auth`
+The account checks now need a **server** to run against, not just a page:
+start one on a spare port with its own `KEYS_DATA` and drive it over
+`http://127.0.0.1`, which the server treats as localhost so the plain-http
+warning does not fire. Do **not** reintroduce a client-side account store to
+make the suite self-contained; the suite exists to test what ships.
+
+## 12. `auth.js` — identity and the re-entry gate  → `Keys.Auth`
 
 ### Read this before changing anything here
 
-**This is not an access-control boundary, and must never be described as one.**
-The app is static files opened from disk with no server behind it. Anyone
-holding the files can set the session key in devtools, edit `auth.js` to skip
-the check, or read the newsletter straight out of the saved `.json`. What the
-gate genuinely provides is that the newsletter is not on screen for whoever
-wanders up to a shared office computer, plus a record of who is working on the
-issue.
+**Accounts are not in this file and not in this browser.** They live on the
+Node server in `server/` (§14), behind the contract in `docs/AUTH-API.md`.
+Passwords are hashed there, sessions are held there, and both clocks are
+enforced there. `auth.js` never sees a hash, never stores an account, and is
+never trusted about the time.
 
-That honesty is a **functional requirement**, not a disclaimer. `verify.js`
-asserts that the wording appears both on the gate and in Settings, because a
-lock that overstates itself is worse than no lock: someone will put
-confidential information behind it. If you restyle these screens, the notice
-stays.
+That splits the app into **two modes**, decided once at load from
+`location.protocol` and published as `Keys.Auth.mode`:
 
-The one part that *is* done properly is password storage — see below.
+| Mode | Reached by | Accounts | Gate |
+|---|---|---|---|
+| `served` | `http:` / `https:` | On the server | Yes — enforced by the server |
+| `offline` | `file:` (and anything else) | None | None at all |
 
-Real access control needs a server: sessions over HTTPS, hashing and role
-checks server-side, and the newsletter itself stored server-side (otherwise
-there is nothing to protect). That is a different project, not a change here.
+**In served mode this IS an access-control boundary**, and must be described as
+one. The server will not hand out `index.html`, the application JavaScript, or
+any API answer without a valid `keys_sid` cookie. The old notice — "this is not
+a security barrier" — is now *false* here, and understating a lock that works
+is its own kind of lie: it invites someone to distrust the one thing protecting
+the newsletter.
+
+**In offline mode there is no gate to describe.** There is no server to
+authenticate against, and a local prompt would protect nothing from somebody
+who already has the files, so `start(boot)` boots immediately. Saying so
+plainly is the point; a sign-in box that anyone can delete by editing one file
+is the failure mode this project keeps refusing.
+
+What served mode does **not** do is encrypt anything. Over plain `http://` the
+password and the newsletter cross the network in the clear, and the newsletter
+is not encrypted at rest anywhere. Both notices say exactly that, and Settings
+says it again, louder, when the connection is not TLS and the host is not
+localhost (`#settings-insecure`).
+
+**The honesty of that copy is a functional requirement, not a disclaimer** —
+in both directions. The notice must not claim more than the mode delivers, and
+must not claim less. It is filled in by `refreshNotices()` into every
+`.auth-notice` and `.set-notice`, from `servedNotice()` or `OFFLINE_NOTICE`, so
+there is one sentence per mode and it cannot drift between the two screens.
+`servedNotice()` quotes the idle timeout, so it is re-rendered when
+`/api/auth/state` reports the server's real `idleMs`. If you restyle these
+screens, the notice stays.
+
+### Gone, and not coming back
+
+- **`crypto.subtle` and browser-side PBKDF2.** Hashing is the server's job.
+- **The secure-context "degraded mode".** It existed only because
+  `crypto.subtle` is unavailable outside a secure context, which meant serving
+  the app from a VM over plain `http://` silently switched accounts off. That
+  failure is **eliminated, not worked around**: nothing in the browser needs
+  `crypto.subtle` any more, so the browser's secure-context rule is no longer
+  involved at all. Do not reintroduce a client-side hash to "support" anything.
+- **`resetAllAccounts()` and `createFirstAdmin()`** as working calls. Both
+  remain on `Keys.Auth` as functions that **throw with an explanation**, which
+  is deliberate: each was a documented path someone will type into a console at
+  exactly the wrong moment, and a `TypeError: not a function` teaches them
+  nothing. Recovery is `node server/reset-accounts.js`; first-run setup is the
+  server's `/setup` page, guarded by a one-time token.
 
 ### Load order
 
@@ -1039,152 +1106,594 @@ if (Keys.Auth) Keys.Auth.start(boot);   // Auth calls boot() after sign-in
 else boot();                            // a missing lock must never brick it
 ```
 
-So while the gate is up the newsletter is not merely hidden — it has never been
-rendered. `verify.js` asserts `#page-stage .paper` count is 0 and that no
-newsletter text appears in `document.body.innerText`.
+The load order itself gains nothing new — but what `auth.js` does with the boot
+decision changed completely, so read `start()` before assuming anything.
+
+In **offline** mode `start()` hides the gate and boots immediately.
+
+In **served** mode the server has already refused to send this page to a
+stranger, so by the time the script runs the visitor is in: `start()` fetches
+`GET /api/auth/state` for identity and then boots. Two edge cases are still
+handled rather than assumed away:
+
+- **The state probe fails.** Boot anyway. The page itself was served, so the
+  session was valid moments ago, and one failed request is not a reason to hold
+  an issue hostage. A `console.warn` says account management will not work
+  until the server answers, and the heartbeat finds out when it returns.
+- **The server says we are not signed in.** A back/forward-cache restore, or a
+  tab that sat open across a server restart. The app has *not* booted, so the
+  gate goes up instead of the editor, and the newsletter is never rendered.
+
+So when the gate is up on the `'boot'` path the newsletter has never been
+rendered — `#page-stage .paper` is empty and no newsletter text is in
+`document.body.innerText`. `verify.js` must keep asserting that.
 
 ### Storage
 
-| Key | Where | Contents |
-|---|---|---|
-| `stpeters.keys.accounts.v1` | `localStorage` | `{ version, users: [...] }` |
-| `stpeters.keys.session.v1` | `sessionStorage` | `{ userId, startedAt }` |
+**None.** `auth.js` writes no `localStorage` key, no `sessionStorage` key and
+no cookie. The session is the server's `keys_sid` cookie, which is `HttpOnly`
+and therefore not readable from script at all — that is the point of it.
 
-A user record is `{ id, name, role, salt, hash, iterations, createdAt }`.
-`role` is `'admin'` or `'user'`.
+Two things are held in memory for the life of the page, and neither authorises
+anything:
 
-The session lives in **`sessionStorage`**, so it dies with the tab, and carries
-`{ userId, startedAt, lastSeen }` — never credentials. It has a 12-hour
-absolute ceiling on top of the idle timeout below.
+- `me` — the user object the server last described, so the toolbar label and
+  `isAdmin()` are not network calls. It can be one heartbeat stale; the server
+  re-checks every request regardless.
+- `lastKnownName` — survives `me` being cleared, purely so the re-auth gate can
+  pre-fill the name box and the person only types a password. Reading `me.name`
+  there is the bug this exists to prevent: by the time the gate is raised `me`
+  is already `null`, and the box came up empty.
 
-### Idle timeout
+### Idle handling — the server owns the clock
 
-**Five minutes of inactivity**, not five minutes of wall clock. A hard cap
-would throw an author out mid-article, which is useless and the fastest way to
-get the feature switched off. `pointerdown`, `pointermove`, `keydown`, `wheel`,
-`scroll`, `focusin` and `input` all reset it. To make it absolute instead, stop
+**Five minutes of inactivity**, not five minutes of wall clock, plus a 12-hour
+absolute ceiling. Both are enforced *server-side* (§14); this file only decides
+**when to ask**, and what to do with a 401 — which is the important half.
+
+`IDLE_MS` starts at the documented default and is **replaced** by the real
+`idleMs` from `/api/auth/state`, so the number quoted in the notices cannot
+drift from the number the server uses.
+
+`pointerdown`, `pointermove`, `keydown`, `wheel`, `scroll`, `focusin` and
+`input` all count as activity. To make the timeout absolute instead, stop
 calling `noteActivity()` from `watchActivity()` — nothing else changes.
 
-- **`lastSeen` on the session is the only clock.** Not an in-memory timer: the
-  timeout then survives a reload and is still enforced when a background tab's
-  timers have been throttled. The write is throttled to one every
-  `TOUCH_THROTTLE_MS`, so the stored value can lag real activity by up to five
-  seconds — conservative against a five-minute budget, which is the right
-  direction to be wrong in. The throttle is measured against the **stored**
-  value, so there is no second clock that can drift out of step with it.
-- Enforced in **two** places: the `IDLE_TICK_MS` timer, and `readSession()` on
-  every load. A tab that was asleep is signed out on the way back in.
-- `visibilitychange` and window `focus` re-check immediately, because a hidden
-  tab's timers are throttled to roughly once a minute.
-- A toast warns `IDLE_WARN_MS` before, so it does not come out of nowhere.
-- On expiry: **autosave, clear `State.dirty`, then reload.** Clearing `dirty`
-  is load-bearing — `beforeunload` puts up the browser's "leave site?" prompt
-  whenever it is set, which would *block the reload* and leave the tab signed
-  in with the newsletter on screen, exactly what the timeout exists to prevent.
-  Nothing is lost: autosave writes the whole document and boot restores it.
-  `reloadCleanly()` does this, and manual sign-out and account deletion use it
-  for the same reason.
-- The gate then shows **why**, once, from a one-shot `REASON_KEY`. Being
-  dropped to a sign-in screen with no explanation reads as a fault.
+**Heartbeat economics.** The old build ticked every 5 seconds against
+`sessionStorage`, which was free; every tick is now an HTTP request. So:
+
+- the timer runs every `HEARTBEAT_MS` (30s) and usually decides to do nothing;
+- `POST /api/auth/touch` is sent at most once a minute (`TOUCH_MIN_MS`), and
+  only when there has been real activity since the last one;
+- a `mousemove` may move the local clock at most once a second
+  (`ACTIVITY_THROTTLE_MS`).
+
+**"Am I still signed in?" is asked with `GET /api/auth/state`, never with
+`touch`.** This is the single most breakable rule in the file. `state` does not
+refresh `lastSeen`; `touch` does. Probing with `touch` would renew the very
+session being asked about, and the five-minute timeout would never fire for a
+tab that is merely open — the feature would silently do nothing while appearing
+to work. `visibilitychange`, window `focus`, `online`, the past-budget
+heartbeat and the first activity after a long gap all go through
+`verifyStillSignedIn()`, which probes state. Only genuine authenticated work
+extends a session.
+
+A backgrounded tab has its timers throttled to a crawl, or stopped outright if
+the machine slept, so returning to the tab is a forced (unthrottled) probe.
+
+A toast warns `IDLE_WARN_MS` (30s) before the budget runs out.
+
+### On expiry: re-authenticate in place — this is the point of the file
+
+The session is gone and the editor is holding an issue that may never have been
+on disk. **Do not reload, and do not navigate to `/login`** — either would take
+the tab, and the server would bounce the reload to the sign-in page anyway.
+`onDropped()` instead raises the in-page `#auth-gate` with `kind: 'reauth'` and
+signs the same person back in via `POST /api/auth/signin`, after which the
+overlay is dismissed and *nothing else changes*: no reload, no navigation, no
+re-render, and the caret goes back where it was.
+
+Order inside `raiseGate('reauth')` is load-bearing:
+
+1. **Autosave first.** Everything after this only moves pixels, but if one of
+   those steps threw, the issue would be behind a gate and not on disk.
+   `State.dirty` is deliberately left set — no navigation is happening, so the
+   `beforeunload` guard should keep protecting.
+2. **Close Settings.** A `<dialog>` opened with `showModal()` lives in the
+   browser's *top layer*, above every `z-index` there is, and `inert` on `#app`
+   does nothing about it because it is outside `#app`. An open Settings dialog
+   would otherwise sit on top of the gate, fully interactive.
+3. **Capture focus before setting `inert`.** The moment `#app` goes inert the
+   browser blurs whatever was focused inside it and `activeElement` becomes
+   `<body>`.
+
+`body.is-relocked`, not `body.is-locked` — see **Markup** below. The gate says **why** in its
+own words, from the server's `code` — `IDLE`, `EXPIRED`, `NO_SESSION`, or no
+code at all when we found out by probing state. Saying "you were idle for five
+minutes" after a server restart is a small lie that costs a support
+conversation, because the person knows perfectly well they were typing. Every
+variant ends with the same reassurance that the issue is safe.
+
+`reloadCleanly()` survives for the paths that genuinely do reload — the Sign
+out button and self-deletion. It autosaves, clears `State.dirty` so
+`beforeunload` cannot block the reload, and reloads; the server sends that
+reload to `/login`, which is the only way to be certain no rendered newsletter
+is left on screen.
+
+### The lapsed-session test is the CODE, never the status
+
+Every Settings action that hits the network goes through `afterServer(res)`,
+which raises the re-auth gate for `IDLE`, `EXPIRED` and `NO_SESSION` **only**.
+
+This bit once, and will again: `POST /api/auth/password` answers **401
+`BAD_CREDENTIALS`** when you mistype your *current* password — the session is
+perfectly fine. An earlier version read the 401 alone, threw the sign-in gate
+over the whole app, and told the user nothing about the typo.
 
 ### Password storage
 
-PBKDF2-SHA256, a fresh 16-byte random salt per user, **310,000 iterations**
-(OWASP's floor for this KDF), 32-byte output, all base64. ~45 ms per
-derivation: imperceptible on sign-in, but it multiplies the cost of an offline
-dictionary attack on the stored hash by 310,000.
+**On the server** — `server/accounts.js`, §14, `docs/AUTH-API.md` §5.
+PBKDF2-HMAC-SHA256, a fresh 16-byte salt per user, **310,000 iterations**,
+32-byte output, compared with `crypto.timingSafeEqual`. Identical parameters to
+the browser version that preceded it, so nothing got weaker by moving.
 
-- `crypto.subtle` needs a **secure context**. `file://`, `https://` and
-  `localhost` are; plain `http://` on any other host is not — so **serving the
-  site from a VM over http:// switches accounts off entirely.** Where it is
-  missing the gate **stands down** rather than fall back to a weaker hash: a
-  dishonest hash is worse than no hash, and bricking the office's newsletter
-  over a convenience lock is worse than both.
+The browser no longer hashes anything, which **eliminates** the worst failure
+this app ever had: `crypto.subtle` requires a secure context, so serving the
+site from a VM over plain `http://` used to switch accounts off entirely, and
+the gate had to stand down loudly and explain itself. That whole apparatus —
+the degraded-mode notice, the `Continue without signing in` button, the
+`verify.js` init script that removed `isSecureContext` — is gone, because the
+condition it handled can no longer occur. The browser's secure-context rule is
+not involved in this app at all any more. It is not something to reinstate.
 
-  It must stand down **loudly**. The first version un-hid a notice that lived
-  inside the gate and then hid the gate, so the explanation was never visible
-  and a misconfigured deployment was indistinguishable from a broken feature.
-  Now the gate stays up carrying the explanation, a `Continue without signing
-  in` button, and a `console.warn` — a server admin is usually looking at
-  devtools, not at the screen. `verify.js` reproduces the condition by removing
-  `isSecureContext` and `crypto.subtle` in an init script; a local HTTP server
-  cannot reproduce it, because every `127.0.0.0/8` address counts as localhost.
-- Sign-in derives a hash **even when the name is unknown**, against a random
-  salt, so a wrong name and a wrong password cost the same and return the same
-  message. Neither can be used to work out who has an account.
-- Comparison is constant-time.
-- Changing a password rotates the salt.
+`MIN_PASSWORD` (8) and `MAX_NAME` (40) are duplicated here as *pre*-validation
+only. They must never be **more permissive** than the server, or the UI
+promises something the server then refuses, and they carry the **same `code`**
+the server would have sent (`WEAK_PASSWORD`, `BAD_NAME`) — a caller branching
+on `code` must not have to care whether the rejection travelled to the server
+or was caught locally. That difference is exactly what makes a UI behave one
+way on a fast network and another on a slow one.
 
 ### Rules
 
-Enforced in `Keys.Auth`, not in the UI — the UI hides what you may not do, but
-the model is what refuses:
+Enforced **on the server**, which is what makes them enforcement rather than
+decoration. The UI hides what you may not do; the server is what refuses:
 
-- The **first** account created is always an administrator. There is **no
-  built-in account and no default password**; a documented default is a real
-  hole even in a lock this modest.
-- Only an administrator may `addUser` or remove **someone else**.
-- Anyone may remove **themselves**, which also signs them out.
-- **The last administrator can never be removed**, by either route. Without
-  that guard an issue could be left with accounts but nobody able to manage
-  them, and the only way out would be clearing browser storage — which throws
-  the newsletter away with it. The UI renders **no** remove button in that
-  case rather than a disabled one.
+- The **first** account is created at `/setup` with a one-time token and is
+  always an administrator. There is **no built-in account and no default
+  password**.
+- Only an administrator may add a user or remove **someone else**
+  (`403 NOT_ADMIN`).
+- Anyone may remove **themselves**, which destroys their session and clears the
+  cookie.
+- **The last administrator can never be removed** (`409 LAST_ADMIN`), by either
+  route. Without that guard a parish is left with accounts and nobody able to
+  manage them, and the only way out is shell access. The UI renders **no**
+  remove button in that case rather than a disabled one.
 - Changing your own password requires the current one, so someone who walks up
-  to an unlocked screen cannot lock the real user out.
-- Names are unique case-insensitively; passwords are ≥ 8 characters.
-- A corrupt or hand-edited account store is **discarded, not trusted**: records
-  without usable hash material are dropped, and if that leaves none the gate
-  falls back to first-run setup. Failing towards "ask for a new password" is
-  the safe direction; failing towards "let anyone in" is not.
+  to an unlocked screen cannot lock the real user out. It rotates the salt and
+  invalidates that user's **other** sessions, keeping the one that made the
+  change.
+- Names are unique case-insensitively, 1–40 characters from
+  `[A-Za-z0-9 ._-]`, stored as typed; passwords are ≥ 8 characters.
+
+Two client-side rules exist on top, and are about *not building* rather than
+*hiding*:
+
+- **A non-administrator must never have the roster built**, not merely hidden.
+  An earlier version left the whole people list — remove button per person and
+  all — sitting in the DOM of anyone who opened Settings. The server 403s
+  `GET /api/users` for them now; that is a reason not to ask, not a reason to
+  relax here. `#settings-user-list` is emptied and the section is not shown.
+- A `403 NOT_ADMIN` on the roster means our cached role is **stale** — someone
+  was demoted since the page loaded. Believe the server, drop the section, and
+  re-read identity.
 
 ### API
 
+**Everything that touches an account now crosses a network.** `users()`,
+`signOut()`, `removeUser()`, `hasAccounts()`, `diagnose()` and `checkIdle()`
+used to return synchronously and now return Promises. This is the one change
+most likely to break a caller silently, because `if (Auth.hasAccounts())` is
+still perfectly valid JavaScript and is now always true.
+
 ```js
-Keys.Auth.hasAccounts()                      // bool
-Keys.Auth.users()                            // [{id,name,role,createdAt}] — never salt/hash
-Keys.Auth.currentUser()                      // {id,name,role} | null
-Keys.Auth.isAdmin()                          // bool
-Keys.Auth.createFirstAdmin(name, pw)         // Promise<{user}|{error}>
-Keys.Auth.signIn(name, pw)                   // Promise<{user}|{error}>
-Keys.Auth.signOut()
-Keys.Auth.addUser(name, pw, role)            // Promise<{user}|{error}>  admin only
-Keys.Auth.removeUser(id)                     // {removed,self}|{error}
-Keys.Auth.changePassword(current, next)      // Promise<{changed}|{error}>
-Keys.Auth.openSettings() / closeSettings()
+Keys.Auth.mode                                // SYNC 'served' | 'offline'
+Keys.Auth.currentUser()                       // SYNC {name,role,createdAt,lastSignInAt} | null
+Keys.Auth.isAdmin()                           // SYNC bool — a UI hint; the server enforces
+Keys.Auth.idleFor()                           // SYNC ms since THIS TAB saw activity
+Keys.Auth.IDLE_MS                             // the server's budget, adopted from /api/auth/state
+Keys.Auth.MIN_PASSWORD                        // 8 — must match the server
+
 Keys.Auth.start(boot)                         // app.js hands boot over
+Keys.Auth.hasAccounts()                       // Promise<bool>  (offline: always false)
+Keys.Auth.users()                             // Promise<{users:[…]}|{error,code}>  admin only
+Keys.Auth.signIn(name, pw)                    // Promise<{user}|{error,code,retryAfterMs}>
+Keys.Auth.signOut()                           // Promise<{signedOut:true}|{error,code}>
+Keys.Auth.addUser(name, pw, role)             // Promise<{user}|{error,code}>  admin only
+Keys.Auth.removeUser(name)                    // Promise<{removed,self}|{error,code}>  BY NAME
+Keys.Auth.changePassword(current, next)       // Promise<{changed:true}|{error,code}>
+Keys.Auth.openSettings() / closeSettings()
 
-Keys.Auth.checkIdle()                         // 'active'|'warning'|'expired'|'no session'
-Keys.Auth.idleFor()                           // ms since last activity
-Keys.Auth.IDLE_MS                             // 5 * 60 * 1000
+Keys.Auth.checkIdle()                         // Promise<'active'|'warning'|'expired'
+                                              //         |'no session'|'unknown'|'offline'>
+Keys.Auth.diagnose()                          // Promise<{…, summary}>
 
-Keys.Auth.diagnose()                          // why the gate is/isn't showing
-Keys.Auth.resetAllAccounts()                  // documented recovery path
+Keys.Auth.resetAllAccounts()                  // THROWS — see below
+Keys.Auth.createFirstAdmin()                  // THROWS — see below
 ```
 
-`diagnose()` answers "it never asked me to create an administrator" without
-guessing: secure context, `crypto.subtle`, storage, account count, session, and
-a plain-English `summary` naming which of those is the reason.
+Points that are easy to get wrong:
 
-`resetAllAccounts()` is the way out of a forgotten administrator password. It
-is **not** a hole — anyone who can call it can already clear the same key from
-the browser's storage panel — and it does not touch the newsletter.
+- **`removeUser` is keyed by NAME, not by a local id.** Server accounts have no
+  id; the route is `DELETE /api/users/:name`.
+- **In offline mode every network-backed call resolves `{ error, code:
+  'OFFLINE' }`** rather than issuing a doomed fetch that will never be answered.
+- **`signOut()` does not clear the screen.** A rendered newsletter is still on
+  display when it resolves. Clearing is the caller's job — the Sign out button
+  follows it with `reloadCleanly()`, which the server bounces to `/login`, and
+  that is the only way to be certain nothing is left visible.
+- **`checkIdle()` always makes the request**, with no throttle, because that is
+  what makes it useful as a test hook: a check that answers `'active'` from a
+  variable has verified nothing. The automatic paths use the throttled
+  internals instead.
+- `currentUser()` and `isAdmin()` answer from the last thing the server said.
+  Nothing is authorised on their strength.
 
-Every operation re-reads the store and re-checks the caller's role. Not because
-that stops anyone — nothing here can — but so the rules live in one place and
-the UI cannot drift away from them.
+`diagnose()` answers "why am I / am I not seeing a gate?" with the **server's**
+view rather than a guess: mode, protocol, host, whether the connection is
+encrypted, whether the server is reachable, whether any accounts exist, who is
+signed in, and a plain-English `summary` naming the reason. With no accounts
+yet it names `/setup` and the setup token — which is the direct answer to "I
+cloned it onto a VM and was never prompted to create an administrator".
+
+`resetAllAccounts()` and `createFirstAdmin()` **throw**, with a message naming
+the replacement. They are kept as loud failures rather than deleted because
+both were documented paths and a bare `TypeError` teaches nobody anything. A
+browser cannot wipe a server's accounts, and pretending otherwise would be the
+sort of comfortable lie this app is built to avoid.
 
 ### Markup
 
-`#auth-gate` (outside `#app`, covers it, `body.is-locked` hides `#app` and it
-is marked `inert`), and `#settings-dialog` (a native `<dialog>`, reusing the
-`.dlg` pattern from the file-name prompt). The gear is
-`[data-act="settings"]`, in the same toolbar group as and immediately beside
-`[data-act="theme"]` — `verify.js` asserts that adjacency.
+`#auth-gate` (outside `#app`, covers it, marked `inert`) and
+`#settings-dialog` (a native `<dialog>`, reusing the `.dlg` pattern from the
+file-name prompt). The gear is `[data-act="settings"]`, in the same toolbar
+group as and immediately beside `[data-act="theme"]` — `verify.js` asserts that
+adjacency.
+
+**Two lock classes on `<body>`, and the difference is not cosmetic:**
+
+| Class | When | `#app` |
+|---|---|---|
+| `is-locked` | `kind: 'boot'` — nothing has been rendered | `display: none` |
+| `is-relocked` | `kind: 'reauth'` — an issue is open behind the gate | **stays laid out** |
+
+`display: none` on the re-auth path would throw away scroll positions, collapse
+the editor and make signing back in feel like a reload — the one thing that
+path exists to avoid. The gate's own background is opaque, so the newsletter is
+covered either way.
+
+Removed from `index.html` when accounts moved to the server, and not to be
+restored: `#auth-degraded` (the secure-context notice), `#auth-confirm-field` /
+`#auth-confirm` (the gate no longer creates the first account — `/setup` does)
+and `#auth-hint`. See `docs/CLASSES.md` for the trap in the CSS this left
+behind.
+
+Added: `#settings-insecure` (`.set-warn`, the plain-http warning),
+`#settings-offline` (`.set-offline`, the file:// note), `#settings-signout`,
+`#settings-password-section`, `#settings-account-section` and
+`#settings-me-h` — whose text is "Signed in" served and "Accounts" offline,
+because "Signed in" is a heading that would be lying where nobody is signed in
+and nobody can be.
+
+`.auth-notice` and `.set-notice` are **empty in the markup on purpose** and
+filled by `refreshNotices()`. The truthful sentence differs by mode, so
+hard-coding one in `index.html` guarantees that one of the two modes ships a
+lie.
 
 ### There is deliberately no test bypass
 
 `tools/verify.js` signs in by driving the real form. Do not add a query
 parameter, global, or build flag that skips the gate: it would be a genuine
-hole in shipped code, and it would stop the sign-in path being exercised on
-every run.
+hole in shipped code — the server-side gate is a real boundary now, so a bypass
+is a real vulnerability, not an embarrassment — and it would stop the sign-in
+path being exercised on every run.
+
+## 13. `stash.js` — the save-for-later drawer  → `Keys.Stash`
+
+A cabinet drawer down the right edge of `#preview-pane`. The handle is always
+visible; clicking it slides the drawer out over the canvas.
+
+### Why the stash is NOT part of the document
+
+It would be the obvious place, and it would be wrong. The point of stashing a
+lunch slip is to use it again in a **later issue**, so the drawer has to outlive
+the document it was filled from. Kept in `doc`, every Load would overwrite the
+library with whatever that file contained, and starting next week's issue would
+empty it. So it lives in its own `localStorage` key — per browser, like the
+theme, not per newsletter. (Accounts used to be the other example here; they
+are on the server now — §12, §14.)
+
+The trade-off is real and is stated in the UI: e-mailing someone the `.json`
+does not send them the saved boxes. `verify.js` asserts both halves — that
+`State.toJSON()` contains no stash, and that `State.replace()` leaves it alone.
+
+### Storage
+
+`stpeters.keys.stash.v1` → `{ version, seeded, items: [...] }`, each item:
+
+```js
+{ id, name, kind, savedAt, payload }
+```
+
+- `kind` exists so this can hold more than lunch slips later. **`slip` is the
+  only implemented kind**; anything else is refused by `add()` rather than
+  half-stored, and dropped on read. Adding a kind means teaching `describe()`,
+  `suggestName()` and `restore()` about it — nothing else cares.
+- `seeded` records that first-run seeding has happened, so **emptying the
+  drawer does not refill it** behind the user's back.
+- On the very first read the drawer is seeded from `doc.slips`, so it opens
+  with something in it and the feature explains itself.
+- Items with no usable `payload`, or an unknown `kind`, are discarded on read.
+  A drawer that throws on open would take the preview pane down with it.
+- Capped at `MAX_ITEMS`, with an explanation rather than silent loss.
+
+### Behaviour
+
+- **Stashing copies, it never moves.** The box stays on the page. Both entry
+  points — the `slip-stash` button on the editor card and the drag onto the
+  drawer — funnel through `Stash.stashSlip(id)`, so they cannot drift apart.
+- **Restoring copies too**, and assigns a **fresh slip id**: the stashed box may
+  still be on the page, and two boxes sharing an id makes every delete and
+  reorder ambiguous.
+- Names come from `suggestName()`, which takes the **first line** of the
+  heading. `textContent` alone runs a multi-line heading together into
+  `THIS THURSDAY, 5/28FOR LUNCHHOTDOG…`.
+- The drawer's naming prompt is `Keys.App.askName` — the same dialog as the
+  file-name prompts, with `label`, `ext: ''` and a `clean` function passed in.
+  One dialog, one focus/settle/escape implementation.
+
+### Drag-and-drop (arrange.js)
+
+`stashTargetAt()` in `arrange.js` hit-tests **the drawer and its handle
+separately**. The handle hangs off the drawer's left edge, *outside* its box,
+and a closed drawer is translated fully off the right of the pane — so its own
+rect is off-screen and the only part the user can aim at is the one part that
+hit-testing the parent misses.
+
+A drop on the drawer deliberately **bypasses `commit()`**: nothing on the page
+changes, so there is no layout to guard, and running the overflow check would
+let a full page refuse a save that cannot overflow anything.
+
+### Markup and CSS
+
+`#stash` is `position: absolute` inside `#preview-pane`, which is
+`position: relative; overflow: hidden` — so the closed drawer is genuinely
+clipped away rather than merely hidden. The **whole aside slides**, handle
+included; the handle is offset left by its own width, so what remains on screen
+when the aside is pushed off the right edge is exactly the handle.
+
+- `.stash-list` is the scrolling region: `flex: 1 1 auto; min-height: 0`.
+  Without `min-height: 0` the list grows and pushes the drawer past the pane.
+- `.stash-item` is a **two-row grid**. Side by side, three buttons left about
+  150px of a 288px drawer for the name, so every label came out as
+  `THIS THURSDAY, …` — which defeats the point of naming them.
+- The closed panel carries `inert`, or its buttons stay in the tab order and
+  focus disappears off the edge of the pane.
+
+### API
+
+```js
+Keys.Stash.items()                    // [{id,name,kind,savedAt}] — no payloads
+Keys.Stash.count()
+Keys.Stash.add(name, kind, payload)   // {item}|{error}  — copies the payload
+Keys.Stash.remove(id) / rename(id, name)
+Keys.Stash.restore(id)                // {restored}|{error} — copies back
+Keys.Stash.clear()
+Keys.Stash.stashSlip(slipId)          // prompt for a name, then add
+Keys.Stash.open() / close() / toggle() / isOpen()
+Keys.Stash.suggestName(slip)
+```
+
+## 14. `server/` — the account server
+
+Node, CommonJS, **zero dependencies**. Not part of `window.Keys`, not loaded by
+`index.html`, and sharing no code with the browser side. The only contract
+between the two halves is `docs/AUTH-API.md`, which is authoritative: **if
+something there is wrong, fix that file first and then both sides.**
+`server/README.md` is the operator's guide — running it, `systemd`, TLS,
+backups, recovery — and is not repeated here.
+
+```
+server/server.js          listener, routing, security headers, static
+                          allowlist, the JSON API, graceful shutdown
+server/accounts.js        password hashing, validation, accounts.json,
+                          the last-administrator rule, the setup token
+server/sessions.js        in-memory sessions and both expiry clocks
+server/ratelimit.js       the sign-in backoff
+server/login.html         served at /login
+server/setup.html         served at /setup
+server/reset-accounts.js  CLI: the way back in
+server/data/              created on first run, mode 0600, gitignored
+```
+
+**No `package.json`, no `node_modules`, no lockfile, and there must never be
+one.** Only `node:http`, `node:https`, `node:crypto`, `node:fs`, `node:path`
+and `node:url`. A parish runs this unattended for years, and every package
+added is something somebody has to patch long after they stopped thinking about
+it.
+
+### The static handler is an ALLOWLIST
+
+The tempting shape is "serve the repository, but refuse `docs/`, `tools/`,
+`server/` and dotfiles". That shape is wrong in a way that only shows up later:
+a denylist has to enumerate every *future* mistake, and the day somebody drops
+`backup.sql`, `notes-with-the-wifi-password.txt` or a `.env` into the project
+root, it is served and nobody finds out until it is indexed.
+
+Exactly four things are reachable, and everything else is a 404 by default:
+
+| Route | Unauthenticated | Authenticated |
+|---|---|---|
+| `GET /` | `302 /setup` if no accounts exist, else `302 /login` | `200 index.html` |
+| `GET /login` | the sign-in page | `302 /` |
+| `GET /setup` | the first-run page, or `302 /login` if accounts exist | `302 /` |
+| `GET /assets/css/app.css` | `200` — allowlisted | `200` |
+| `GET /assets/**` (anything else) | `401` | `200` |
+| anything else | `404` | `404` |
+
+- **`/assets/css/app.css` is the one unauthenticated asset**, written as an
+  exact path so it can never widen into a prefix by accident. The sign-in and
+  setup pages are styled by it, so it must be readable before sign-in; it gives
+  away the colour of the buttons and nothing else. Everything else under
+  `assets/` needs a session, which is why the application JavaScript is not
+  readable by a stranger.
+- **Extensions are an allowlist too** (`MIME`). An unknown extension is a 404,
+  so an accidentally committed `assets/notes.md` or `assets/keys.pem` is not
+  served and nothing is ever sent with a guessed `Content-Type`.
+- **Three independent traversal layers, all needed.** `parsePath()` decodes
+  **exactly once** and then checks segment by segment — a second decode is how
+  `%252e%252e` becomes `..` — and rejects `.`/`..`, dotfiles, NUL bytes and
+  backslashes. `resolveAsset()` then does a lexical containment check, and then
+  a `realpath` check. The segment check stops `..`; the lexical check stops a
+  path resolving outside the root; only the `realpath` check stops a **symlink
+  inside `assets/`** pointing at `/etc/shadow`.
+- Assets are sent `private, no-cache`, so no shared proxy keeps a copy and the
+  browser revalidates — which means the authentication check above runs every
+  time rather than once.
+- `docs/`, `reference/`, `tools/`, `server/` and dotfiles are **never** served.
+
+### CSRF: one rule, applied before routing
+
+Every non-`GET` request must satisfy **all** of:
+
+1. `Content-Type: application/json`,
+2. `Origin` (or `Referer` when `Origin` is absent) matching the request's own
+   `Host` — and, under TLS, an `https:` origin, because an `http:` one on the
+   same host means something stripped the transport,
+3. the `keys_sid` cookie being `SameSite=Strict` (browser-enforced).
+
+Failing any of them is `403 { code: "CSRF" }`. The check runs **before any
+routing**, so a new endpoint added later cannot quietly miss it.
+
+- **Both headers absent is a refusal, not a pass.** Browsers send `Origin` on
+  every non-`GET`; a caller that sends neither is a script, and a script can
+  send the header. "Allow when unsure" is how CSRF checks come to be worth
+  nothing.
+- **The content-type rule applies to `DELETE`, which has no body.** So
+  `DELETE /api/users/:name` must still carry `Content-Type: application/json`
+  or it is refused — the one place this is easy to get wrong, and the client
+  sends it unconditionally. It is kept rather than exempted because "all
+  non-GET requests carry this header" is a rule a reader can check at a glance,
+  whereas "all except `DELETE`, because that one leans on the `Origin` leg
+  alone" is the kind of carve-out that quietly grows.
+- **There is no `OPTIONS` handler and no `Access-Control-Allow-*` header
+  anywhere, and that is the mechanism, not an omission.** A cross-origin
+  `fetch()` sending `Content-Type: application/json` needs a successful
+  preflight; the preflight falls into this same check, gets a `403` with no
+  CORS headers, and the real request is never sent.
+
+### Sessions: two clocks, both server-side
+
+- Cookie `keys_sid`: 32 random bytes, base64url, `HttpOnly; SameSite=Strict;
+  Path=/`, and `Secure` **only** under real TLS. No `Max-Age` and no `Expires`,
+  so it is a session cookie and closing the browser ends it too.
+- **The server stores `sha256(token)`, never the token.** A heap dump or a
+  stray log line then yields nothing usable.
+- **Idle**: `KEYS_IDLE_MS` (default 5 minutes) since the last *authenticated*
+  request. **Absolute**: 12 hours since sign-in, not configurable. In memory,
+  so a restart signs everyone out — acceptable, and slightly safer than
+  persisting them. That is a sign-in prompt, not lost work: the newsletter
+  autosaves continuously.
+- Expiry is reported as a **distinct code** — `IDLE`, `EXPIRED`,
+  `NO_SESSION` — because the gate says why, and "you were idle for five
+  minutes" after a server restart is a small lie that costs a support call.
+- **`GET /api/auth/state` must never refresh `lastSeen`, and this is
+  load-bearing.** It is the client's only read-only "am I still signed in?"
+  probe (§12). If it refreshed the idle clock, every probe would become a
+  keepalive and the timeout would never fire for a tab that is merely open —
+  the feature would silently do nothing. Only `touch` and genuine authenticated
+  work extend a session.
+- Changing a password rotates the salt and destroys that user's **other**
+  sessions, keeping the one that made the change.
+
+### Accounts
+
+PBKDF2-HMAC-SHA256, **310,000** iterations, 32-byte key, per-user 16-byte
+random salt, compared with `crypto.timingSafeEqual`. Sign-in does the same
+amount of work for an unknown name as for a wrong password, and returns the
+same `401 BAD_CREDENTIALS`, so neither reveals who has an account.
+
+- Stored in `KEYS_DATA/accounts.json`, mode `0600`, and **written atomically**:
+  temp file in the same directory, `fsync`, then `rename`. This is
+  load-bearing. A crash halfway through a plain `writeFile` leaves a truncated
+  file, which on the next start is an accounts file with no administrator and
+  no setup token to make one — a permanently locked-out parish. Do not simplify
+  it.
+- **A corrupt `accounts.json` makes the server refuse to start**, loudly.
+  Treating an unreadable file as "no accounts exist" would silently turn a
+  damaged file into an open `/setup` for whoever found it first.
+- Rate limiting is per `(IP, lowercased name)`: 5 free attempts, then a
+  doubling delay from 1s capped at 5 minutes, decaying after 15 minutes of
+  quiet, cleared by a successful sign-in. `X-Forwarded-For` is believed **only**
+  when `KEYS_TRUST_PROXY` is set — without that guard anyone can send a
+  different value on every request and get a fresh budget each time, which is a
+  rate limiter that looks like protection and is not.
+
+### First run: the setup token
+
+With no accounts, the server generates a one-time token, prints it in a banner
+at **every** start in that state, and writes it to `KEYS_DATA/setup-token.txt`
+at mode `0600` for an admin who has lost the console. `GET /` sends a fresh box
+to `/setup` rather than to a sign-in form for an account nobody has yet. The
+token is consumed on success, after which `/setup` answers `403 SETUP_DONE`
+forever.
+
+It exists so that the administrator account cannot be claimed by whoever
+reaches the box first on a shared network — without it, "deploy the app" and
+"hand the parish newsletter to a stranger" are the same act. It is also the
+direct answer to *"I cloned it onto a VM and was never prompted to create an
+administrator"*: the prompt is now unmissable, in the console and at `/setup`.
+
+**The setup token is the only secret this process ever prints.** No password,
+no session token, no hash appears in any log line — and printing the token *is*
+its job, useless the moment the first account exists.
+
+Recovery is `node server/reset-accounts.js` (`--yes` to skip the
+confirmation). It lists the accounts, requires the operator to type `DELETE`,
+removes `accounts.json` and issues a fresh token. It knows about two files in
+`KEYS_DATA` and nothing else, so it **never touches newsletter content**; it
+destroys accounts rather than revealing them; and it needs shell access, which
+is a strictly higher bar than knowing a password.
+
+### Configuration
+
+Environment variables only — `docs/AUTH-API.md` §7 is the authoritative table.
+`KEYS_PORT`, `KEYS_HOST`, `KEYS_DATA`, `KEYS_IDLE_MS`, `KEYS_TLS_CERT` +
+`KEYS_TLS_KEY` (both or neither), `KEYS_TRUST_PROXY`.
+
+Two things are deliberately not configurable: the 12-hour absolute session
+ceiling and the 310,000 PBKDF2 iterations. Both are floors, not preferences.
+
+### Traps worth knowing before you change anything here
+
+- **`Secure` on the session cookie must track real TLS.** A `Secure` cookie
+  arriving over plain `http` is stored and then never sent back: sign-in
+  appears to succeed, the redirect to `/` lands, the server sees no cookie and
+  bounces to `/login`. From outside that is an endless loop with no error
+  anywhere, and every instinct says the password is wrong. Do not "harden" it
+  by making it unconditional.
+- **`'unsafe-inline'` in the Content-Security-Policy is not laziness.** The
+  shrink-to-fit machinery writes inline styles (§4), `state.js` re-applies a
+  sanitised `style` attribute to pasted markup, and `index.html` runs an inline
+  theme bootstrap before the stylesheets. Tightening `style-src` produces no
+  error anybody notices — it quietly stops the text fitting the page, which is
+  the one thing this application exists to do.
+- **`Strict-Transport-Security` is sent only under TLS.** Pinning a parish box
+  to HTTPS before it has a certificate makes it unreachable, and the fix then
+  lives inside the browser rather than on the server.
+- **Plain HTTP is a real limitation and is stated as one.** The server warns at
+  every start, reports `"secure": false` from `/api/auth/state`, and the app
+  raises `#settings-insecure` when that is false and the host is not localhost.
+  The sign-in is a genuine access-control boundary; it is not confidentiality,
+  and the newsletter is not encrypted at rest anywhere.
