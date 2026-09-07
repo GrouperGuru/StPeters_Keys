@@ -1054,8 +1054,38 @@ A user record is `{ id, name, role, salt, hash, iterations, createdAt }`.
 `role` is `'admin'` or `'user'`.
 
 The session lives in **`sessionStorage`**, so it dies with the tab, and carries
-only an id — never credentials. It also has a 12-hour absolute ceiling, so a
-browser left open overnight is not still signed in by morning.
+`{ userId, startedAt, lastSeen }` — never credentials. It has a 12-hour
+absolute ceiling on top of the idle timeout below.
+
+### Idle timeout
+
+**Five minutes of inactivity**, not five minutes of wall clock. A hard cap
+would throw an author out mid-article, which is useless and the fastest way to
+get the feature switched off. `pointerdown`, `pointermove`, `keydown`, `wheel`,
+`scroll`, `focusin` and `input` all reset it. To make it absolute instead, stop
+calling `noteActivity()` from `watchActivity()` — nothing else changes.
+
+- **`lastSeen` on the session is the only clock.** Not an in-memory timer: the
+  timeout then survives a reload and is still enforced when a background tab's
+  timers have been throttled. The write is throttled to one every
+  `TOUCH_THROTTLE_MS`, so the stored value can lag real activity by up to five
+  seconds — conservative against a five-minute budget, which is the right
+  direction to be wrong in. The throttle is measured against the **stored**
+  value, so there is no second clock that can drift out of step with it.
+- Enforced in **two** places: the `IDLE_TICK_MS` timer, and `readSession()` on
+  every load. A tab that was asleep is signed out on the way back in.
+- `visibilitychange` and window `focus` re-check immediately, because a hidden
+  tab's timers are throttled to roughly once a minute.
+- A toast warns `IDLE_WARN_MS` before, so it does not come out of nowhere.
+- On expiry: **autosave, clear `State.dirty`, then reload.** Clearing `dirty`
+  is load-bearing — `beforeunload` puts up the browser's "leave site?" prompt
+  whenever it is set, which would *block the reload* and leave the tab signed
+  in with the newsletter on screen, exactly what the timeout exists to prevent.
+  Nothing is lost: autosave writes the whole document and boot restores it.
+  `reloadCleanly()` does this, and manual sign-out and account deletion use it
+  for the same reason.
+- The gate then shows **why**, once, from a one-shot `REASON_KEY`. Being
+  dropped to a sign-in screen with no explanation reads as a fault.
 
 ### Password storage
 
@@ -1064,11 +1094,21 @@ PBKDF2-SHA256, a fresh 16-byte random salt per user, **310,000 iterations**
 derivation: imperceptible on sign-in, but it multiplies the cost of an offline
 dictionary attack on the stored hash by 310,000.
 
-- `crypto.subtle` needs a **secure context**. `file://` and `https://` are;
-  plain `http://` is not. Where it is missing, the gate **stands down entirely
-  and says so** (`#auth-degraded`) rather than fall back to a weaker hash. A
+- `crypto.subtle` needs a **secure context**. `file://`, `https://` and
+  `localhost` are; plain `http://` on any other host is not — so **serving the
+  site from a VM over http:// switches accounts off entirely.** Where it is
+  missing the gate **stands down** rather than fall back to a weaker hash: a
   dishonest hash is worse than no hash, and bricking the office's newsletter
   over a convenience lock is worse than both.
+
+  It must stand down **loudly**. The first version un-hid a notice that lived
+  inside the gate and then hid the gate, so the explanation was never visible
+  and a misconfigured deployment was indistinguishable from a broken feature.
+  Now the gate stays up carrying the explanation, a `Continue without signing
+  in` button, and a `console.warn` — a server admin is usually looking at
+  devtools, not at the screen. `verify.js` reproduces the condition by removing
+  `isSecureContext` and `crypto.subtle` in an init script; a local HTTP server
+  cannot reproduce it, because every `127.0.0.0/8` address counts as localhost.
 - Sign-in derives a hash **even when the name is unknown**, against a random
   salt, so a wrong name and a wrong password cost the same and return the same
   message. Neither can be used to work out who has an account.
@@ -1113,7 +1153,22 @@ Keys.Auth.removeUser(id)                     // {removed,self}|{error}
 Keys.Auth.changePassword(current, next)      // Promise<{changed}|{error}>
 Keys.Auth.openSettings() / closeSettings()
 Keys.Auth.start(boot)                         // app.js hands boot over
+
+Keys.Auth.checkIdle()                         // 'active'|'warning'|'expired'|'no session'
+Keys.Auth.idleFor()                           // ms since last activity
+Keys.Auth.IDLE_MS                             // 5 * 60 * 1000
+
+Keys.Auth.diagnose()                          // why the gate is/isn't showing
+Keys.Auth.resetAllAccounts()                  // documented recovery path
 ```
+
+`diagnose()` answers "it never asked me to create an administrator" without
+guessing: secure context, `crypto.subtle`, storage, account count, session, and
+a plain-English `summary` naming which of those is the reason.
+
+`resetAllAccounts()` is the way out of a forgotten administrator password. It
+is **not** a hole — anyone who can call it can already clear the same key from
+the browser's storage panel — and it does not touch the newsletter.
 
 Every operation re-reads the store and re-checks the caller's role. Not because
 that stops anyone — nothing here can — but so the rules live in one place and

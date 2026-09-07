@@ -235,12 +235,29 @@
     <h1 class="auth-title" id="auth-title">Sign in to St. Peter&rsquo;s Keys</h1>
     <p class="auth-lead" id="auth-lead"></p>
 
-    <p class="auth-degraded" id="auth-degraded" hidden>
-      This browser cannot check passwords here, because the page is not in a
-      secure context. Accounts are switched off so you can still work; open the
-      file directly from disk, or serve it over <code>https://</code>, to use
-      them.
-    </p>
+    <!-- Shown INSTEAD of the form when crypto.subtle is unavailable, i.e. the
+         page is not in a secure context. Serving over plain http:// on a
+         server is the usual cause, and the symptom is otherwise just "it
+         never asks me to sign in", so this has to be loud. -->
+    <div class="auth-degraded" id="auth-degraded" hidden>
+      <p>
+        <strong>Accounts are switched off here.</strong> Passwords cannot be
+        checked, because this page is not in a <em>secure context</em> — the
+        browser only allows the necessary cryptography over
+        <code>https://</code>, on <code>localhost</code>, or when the file is
+        opened directly from disk.
+      </p>
+      <p>
+        Serve the site over HTTPS (or reach it through an SSH tunnel on
+        <code>localhost</code>) and the sign-in will come back by itself.
+        Nothing has been lost.
+      </p>
+      <button type="button" class="tb-btn auth-submit" data-auth="continue">
+        Continue without signing in
+      </button>
+    </div>
+
+    <p class="auth-note" id="auth-note" hidden></p>
 
     <form id="auth-form" novalidate>
       <div class="auth-field">

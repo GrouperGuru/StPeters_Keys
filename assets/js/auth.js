@@ -54,10 +54,40 @@
    * not still be signed in in the morning. */
   var SESSION_MAX_AGE_MS = 12 * 60 * 60 * 1000;
 
+  /* ---------------------------------------------------------------------------
+   * Idle timeout
+   *
+   * Five minutes of INACTIVITY, not five minutes of wall clock. The point of
+   * this lock is the office machine somebody walked away from, and a hard
+   * five-minute cap would throw an author out in the middle of typing an
+   * article — which is both useless and the fastest way to get the whole
+   * feature switched off. Any pointer, key, scroll or focus resets it.
+   *
+   * To make it an absolute cap instead, stop calling noteActivity() from the
+   * listeners in watchActivity() — nothing else needs to change.
+   *
+   * `lastSeen` on the session (not an in-memory clock) is the source of truth,
+   * so the timeout survives a reload and is still enforced when a background
+   * tab has had its timers throttled. Writes are throttled to one every few
+   * seconds, so the stored value can lag real activity by up to
+   * TOUCH_THROTTLE_MS — five seconds of conservatism against a five-minute
+   * budget, which is the right direction to be wrong in.
+   * ------------------------------------------------------------------------ */
+  var IDLE_MS = 5 * 60 * 1000;
+  var IDLE_WARN_MS = 30 * 1000;     // warn this long before signing out
+  var IDLE_TICK_MS = 5000;
+  var TOUCH_THROTTLE_MS = 5000;
+
+  /* Why the last sign-out happened, so the gate can say so. One-shot. */
+  var REASON_KEY = 'stpeters.keys.signout-reason.v1';
+
   var ROLES = { admin: 1, user: 1 };
 
   var bootApp = null;        // handed over by app.js
   var started = false;
+  var idleTimer = null;
+  var idleWarned = false;
+  var activityBound = false;
 
   /* -------------------------------------------------------------------------
    * Small helpers
@@ -214,15 +244,41 @@
   /* -------------------------------------------------------------------------
    * Session
    * ---------------------------------------------------------------------- */
-  function readSession() {
+  function rawSession() {
     var raw;
     try { raw = sessionStorage.getItem(SESSION_KEY); } catch (e) { raw = null; }
     if (!raw) return null;
     var s;
     try { s = JSON.parse(raw); } catch (e) { return null; }
     if (!s || typeof s !== 'object' || !s.userId) return null;
+    return s;
+  }
+
+  /** Milliseconds since the session was last active, or Infinity if there
+   *  isn't one. A missing/garbled `lastSeen` counts as expired rather than
+   *  fresh — failing towards "sign in again" is the safe direction. */
+  function idleFor(s) {
+    s = s || rawSession();
+    if (!s) return Infinity;
+    var seen = Number(s.lastSeen);
+    if (!isFinite(seen)) return Infinity;
+    return Date.now() - seen;
+  }
+
+  function readSession() {
+    var s = rawSession();
+    if (!s) return null;
+
     if (!isFinite(Number(s.startedAt)) ||
         Date.now() - Number(s.startedAt) > SESSION_MAX_AGE_MS) {
+      clearSession();
+      return null;
+    }
+    /* Enforced HERE as well as on the timer, so a tab that was asleep — or one
+     * reopened after the timers stopped running at all — is still signed out
+     * on the way back in rather than only after the next tick. */
+    if (idleFor(s) > IDLE_MS) {
+      setSignOutReason('idle');
       clearSession();
       return null;
     }
@@ -233,15 +289,129 @@
   }
 
   function writeSession(user) {
+    var now = Date.now();
     try {
       sessionStorage.setItem(SESSION_KEY, JSON.stringify({
-        userId: user.id, startedAt: Date.now()
+        userId: user.id, startedAt: now, lastSeen: now
       }));
     } catch (e) {}
   }
 
   function clearSession() {
     try { sessionStorage.removeItem(SESSION_KEY); } catch (e) {}
+  }
+
+  function setSignOutReason(reason) {
+    try { sessionStorage.setItem(REASON_KEY, reason); } catch (e) {}
+  }
+
+  /** Read and consume the reason — it must show once, not on every reload. */
+  function takeSignOutReason() {
+    var r = null;
+    try {
+      r = sessionStorage.getItem(REASON_KEY);
+      sessionStorage.removeItem(REASON_KEY);
+    } catch (e) {}
+    return r;
+  }
+
+  /* -------------------------------------------------------------------------
+   * Idle watch
+   * ---------------------------------------------------------------------- */
+
+  /** Record that the user is still here. Throttled — this runs on mousemove.
+   *
+   *  The throttle is measured against the STORED `lastSeen`, not a separate
+   *  in-memory "last written" clock. With two clocks they can drift apart
+   *  (anything that writes the session without going through here desyncs
+   *  them), and then a genuine burst of activity gets swallowed by a throttle
+   *  that thinks it only just wrote. One clock cannot disagree with itself. */
+  function noteActivity() {
+    var now = Date.now();
+    if (idleWarned) idleWarned = false;
+    var s = rawSession();
+    if (!s) return;
+    if (now - Number(s.lastSeen || 0) < TOUCH_THROTTLE_MS) return;
+    s.lastSeen = now;
+    try { sessionStorage.setItem(SESSION_KEY, JSON.stringify(s)); } catch (e) {}
+  }
+
+  /** The check the timer runs. Exposed so tests can wind `lastSeen` back and
+   *  run the real thing, rather than the timeout having to be shortened for
+   *  them — a constant that only tests use is a constant nobody verifies. */
+  function checkIdle() {
+    var s = rawSession();
+    if (!s) { stopIdleWatch(); return 'no session'; }
+
+    var idle = idleFor(s);
+    if (idle > IDLE_MS) { expireNow(); return 'expired'; }
+
+    if (idle > IDLE_MS - IDLE_WARN_MS) {
+      if (!idleWarned) {
+        idleWarned = true;
+        var secs = Math.max(5, Math.round((IDLE_MS - idle) / 1000));
+        if (Keys.App && Keys.App.toast) {
+          Keys.App.toast('You will be signed out in about ' + secs +
+            ' seconds. Move the mouse or type to stay signed in.', 'warn');
+        }
+      }
+      return 'warning';
+    }
+    return 'active';
+  }
+
+  /** Sign out because the session went idle, then hand the tab back to the
+   *  gate. Reloading is how the manual Sign out works too, and it is the only
+   *  way to be certain no rendered newsletter is left behind the gate. */
+  function expireNow() {
+    stopIdleWatch();
+    setSignOutReason('idle');
+    clearSession();
+    reloadCleanly();
+  }
+
+  /* The newsletter is autosaved continuously, but `beforeunload` still puts up
+   * the browser's "leave site?" prompt whenever State.dirty is set — which
+   * would BLOCK this reload and leave the tab signed in with the newsletter on
+   * screen, exactly the situation the timeout exists to prevent. Persist
+   * first, then clear the flag so the unload is silent. Nothing is lost:
+   * autosave writes the whole document, and boot restores it. */
+  function reloadCleanly() {
+    try {
+      if (Keys.State) {
+        Keys.State.autosave();
+        Keys.State.dirty = false;
+      }
+    } catch (e) {}
+    global.location.reload();
+  }
+
+  var ACTIVITY_EVENTS = ['pointerdown', 'pointermove', 'keydown', 'wheel',
+                         'scroll', 'focusin', 'input'];
+
+  function watchActivity() {
+    if (activityBound) return;
+    activityBound = true;
+    ACTIVITY_EVENTS.forEach(function (name) {
+      document.addEventListener(name, noteActivity, { passive: true, capture: true });
+    });
+    // Coming back to a backgrounded tab must be re-checked at once: its timers
+    // may have been throttled to a crawl while it was hidden.
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden) checkIdle();
+    });
+    global.addEventListener('focus', function () { checkIdle(); });
+  }
+
+  function startIdleWatch() {
+    watchActivity();
+    stopIdleWatch();
+    idleWarned = false;
+    idleTimer = setInterval(checkIdle, IDLE_TICK_MS);
+  }
+
+  function stopIdleWatch() {
+    if (idleTimer) { clearInterval(idleTimer); idleTimer = null; }
   }
 
   /* -------------------------------------------------------------------------
@@ -461,17 +631,88 @@
 
       /* No secure context means no key derivation. Rather than fall back to a
        * weaker hash (dishonest) or refuse to run (a lock this modest must
-       * never cost anyone their newsletter), stand the gate down and say so. */
+       * never cost anyone their newsletter), stand the gate down and say so.
+       *
+       * It must SAY so somewhere a person will actually see. The first version
+       * of this un-hid a notice that lived inside the gate and then hid the
+       * gate, so the explanation was never visible and the app simply opened
+       * with no sign-in at all — indistinguishable from the feature being
+       * broken. Now the gate stays up carrying only the explanation. */
       if (!cryptoAvailable()) {
-        showDegradedNotice();
-        unlock();
+        showDegradedGate();
         return;
       }
 
       var me = readSession();
       if (me) { unlock(); return; }
       showGate();
-    }
+    },
+
+    /* --- diagnosis -------------------------------------------------------
+     * For "why am I not being asked to create an administrator?". Every way
+     * that can happen is here, in one call, so it can be answered from the
+     * console on a server instead of guessed at.
+     * ------------------------------------------------------------------ */
+    diagnose: function () {
+      var storage;
+      try {
+        localStorage.setItem('__keys_probe', '1');
+        localStorage.removeItem('__keys_probe');
+        storage = 'ok';
+      } catch (e) {
+        storage = 'BLOCKED (' + e.name + ')';
+      }
+
+      var why = null;
+      if (!cryptoAvailable()) {
+        why = 'Accounts are OFF: crypto.subtle is unavailable, because this ' +
+          'page is not in a secure context. Serve it over https://, open the ' +
+          'file directly, or reach it on localhost.';
+      } else if (storage !== 'ok') {
+        why = 'Accounts cannot be saved: this browser is blocking storage.';
+      } else if (readStore().users.length === 0) {
+        why = 'No accounts yet — the gate should be showing first-time setup.';
+      } else if (readSession()) {
+        why = 'Already signed in, so there is nothing to prompt for. ' +
+          'Sign out from Settings to see the gate.';
+      } else {
+        why = 'Accounts exist and nobody is signed in — the gate should be ' +
+          'showing the sign-in form.';
+      }
+
+      return {
+        summary: why,
+        authLoaded: true,
+        secureContext: !!global.isSecureContext,
+        protocol: global.location.protocol,
+        host: global.location.hostname,
+        cryptoSubtle: !!(global.crypto && global.crypto.subtle),
+        localStorage: storage,
+        accounts: readStore().users.length,
+        signedIn: !!readSession(),
+        idleTimeoutMinutes: IDLE_MS / 60000
+      };
+    },
+
+    /** Wipe every account so the next load runs first-time setup again.
+     *
+     *  The documented recovery path for "nobody can get in any more" — a
+     *  forgotten administrator password, or a half-configured deployment.
+     *  It is not a hole: anyone who can call this can already clear the same
+     *  key from the browser's storage panel. It does NOT touch the newsletter. */
+    resetAllAccounts: function () {
+      try { localStorage.removeItem(ACCOUNTS_KEY); } catch (e) {}
+      clearSession();
+      try { sessionStorage.removeItem(REASON_KEY); } catch (e) {}
+      return 'All accounts cleared. Reload the page to create the ' +
+             'administrator account again. The newsletter is untouched.';
+    },
+
+    /* Exposed so tests can run the real idle check after winding the clock
+     * back, rather than waiting five minutes or shortening the timeout. */
+    checkIdle: checkIdle,
+    idleFor: function () { return idleFor(); },
+    IDLE_MS: IDLE_MS
   };
 
   /* -------------------------------------------------------------------------
@@ -484,6 +725,31 @@
     'confidential in it.';
 
   function gateEl() { return $('#auth-gate'); }
+
+  /** Put the gate up carrying only the "accounts are off here" explanation
+   *  and a way through, so a misconfigured deployment is loud rather than
+   *  silently featureless. */
+  function showDegradedGate() {
+    var gate = gateEl();
+    if (!gate) { unlock(); return; }
+
+    $('#auth-degraded').hidden = false;
+    $('#auth-form').hidden = true;
+    $('#auth-title').textContent = 'Accounts are switched off';
+    $('#auth-lead').textContent = '';
+    setGateError('');
+
+    document.body.classList.add('is-locked');
+    gate.hidden = false;
+    var app = $('#app');
+    if (app) app.setAttribute('inert', '');
+
+    // Also leave the diagnosis in the console: on a server the person fixing
+    // this is usually looking at devtools, not at the screen.
+    try {
+      global.console.warn('[St. Peter’s Keys] ' + Auth.diagnose().summary);
+    } catch (e) {}
+  }
 
   function showGate() {
     var gate = gateEl();
@@ -504,8 +770,17 @@
       ? 'At least ' + MIN_PASSWORD + ' characters. A phrase you will remember ' +
         'is better than something short and clever.'
       : '';
+
+    /* Say why they are back here, once. Being dropped to a sign-in screen with
+     * no explanation reads as a fault rather than a timeout. */
+    var reason = takeSignOutReason();
+    setGateNote(reason === 'idle'
+      ? 'You were signed out after ' + Math.round(IDLE_MS / 60000) +
+        ' minutes without activity. Your newsletter was saved.'
+      : '');
     setGateError('');
 
+    stopIdleWatch();
     document.body.classList.add('is-locked');
     gate.hidden = false;
     var app = $('#app');
@@ -518,6 +793,13 @@
 
   function setGateError(msg) {
     var box = $('#auth-error');
+    if (!box) return;
+    box.textContent = msg || '';
+    box.hidden = !msg;
+  }
+
+  function setGateNote(msg) {
+    var box = $('#auth-note');
     if (!box) return;
     box.textContent = msg || '';
     box.hidden = !msg;
@@ -539,11 +821,9 @@
     if (app) app.removeAttribute('inert');
     if (bootApp) { var b = bootApp; bootApp = null; b(); }
     syncIdentity();
-  }
-
-  function showDegradedNotice() {
-    var el = $('#auth-degraded');
-    if (el) el.hidden = false;
+    // Only run the idle clock for a real session. In degraded mode there is
+    // nobody signed in and nothing to sign out of.
+    if (readSession()) startIdleWatch();
   }
 
   function onGateSubmit(e) {
@@ -572,6 +852,7 @@
         return;
       }
       unlock();
+      startIdleWatch();
       if (Keys.App && Keys.App.toast) {
         Keys.App.toast(firstRun
           ? 'Administrator account created. Welcome, ' + res.user.name + '.'
@@ -682,10 +963,12 @@
 
     if (act === 'signout') {
       Auth.signOut();
+      stopIdleWatch();
       closeSettings();
       // Reload rather than tear the app down by hand: it is the only way to
-      // be sure no rendered newsletter is left behind the gate.
-      global.location.reload();
+      // be sure no rendered newsletter is left behind the gate. reloadCleanly
+      // persists first so `beforeunload` cannot put up a prompt and block it.
+      reloadCleanly();
       return;
     }
 
@@ -708,8 +991,9 @@
           'The newsletter itself is not deleted.')) return;
       var out = Auth.removeUser(me.id);
       if (out.error) { setSettingsMessage(out.error, 'err'); return; }
+      stopIdleWatch();
       closeSettings();
-      global.location.reload();
+      reloadCleanly();
       return;
     }
   }
@@ -768,6 +1052,14 @@
   function wire() {
     var gateForm = $('#auth-form');
     if (gateForm) gateForm.addEventListener('submit', onGateSubmit);
+
+    var gate = gateEl();
+    if (gate) {
+      gate.addEventListener('click', function (e) {
+        var btn = e.target.closest ? e.target.closest('[data-auth]') : null;
+        if (btn && btn.getAttribute('data-auth') === 'continue') unlock();
+      });
+    }
 
     $$('.auth-notice, .set-notice').forEach(function (el) {
       if (!el.textContent.trim()) el.textContent = HONEST_NOTICE;

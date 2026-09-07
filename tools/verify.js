@@ -3804,6 +3804,172 @@ async function main() {
     afterSignOut.confirmShown === false,
     `title="${afterSignOut.title}"`);
 
+  /* --- idle timeout ------------------------------------------------------
+   * Five minutes of INACTIVITY. The checks wind the session's `lastSeen` back
+   * and run the real check, rather than the timeout being shortened for the
+   * tests — a constant only tests use is a constant nobody verifies.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — signed out after 5 minutes idle');
+
+  await auth.fill('#auth-name', 'Head Teacher');
+  await auth.fill('#auth-password', 'a-brand-new-passphrase');
+  await auth.click('#auth-submit');
+  await auth.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 10000 });
+  await auth.waitForTimeout(600);
+
+  const idleConst = await auth.evaluate(() => window.Keys.Auth.IDLE_MS);
+  check('the idle timeout is five minutes', idleConst === 5 * 60 * 1000,
+    idleConst + 'ms');
+
+  /** Wind the session's last-activity stamp back by `ms` and run the check. */
+  const windBack = (ms) => auth.evaluate(back => {
+    const k = window.Keys.Auth.SESSION_KEY;
+    const s = JSON.parse(sessionStorage.getItem(k));
+    s.lastSeen = Date.now() - back;
+    sessionStorage.setItem(k, JSON.stringify(s));
+    return window.Keys.Auth.checkIdle();
+  }, ms);
+
+  check('a session that has just been used is active',
+    (await auth.evaluate(() => window.Keys.Auth.checkIdle())) === 'active');
+  check('four minutes of idling is not enough to be signed out',
+    (await windBack(4 * 60 * 1000)) === 'active');
+
+  const warned = await auth.evaluate(async back => {
+    const k = window.Keys.Auth.SESSION_KEY;
+    const s = JSON.parse(sessionStorage.getItem(k));
+    s.lastSeen = Date.now() - back;
+    sessionStorage.setItem(k, JSON.stringify(s));
+    document.querySelectorAll('#toasts .toast').forEach(t => t.remove());
+    const result = window.Keys.Auth.checkIdle();
+    await new Promise(r => setTimeout(r, 120));
+    return {
+      result,
+      toast: [...document.querySelectorAll('#toasts .toast')]
+        .map(t => t.textContent).join(' | '),
+      stillSignedIn: !!window.Keys.Auth.currentUser()
+    };
+  }, 5 * 60 * 1000 - 20000);
+  check('the last half-minute warns instead of signing straight out',
+    warned.result === 'warning' && warned.stillSignedIn === true &&
+    /signed out in about/i.test(warned.toast),
+    JSON.stringify(warned));
+
+  // Real activity, through the real listeners, must reset the clock.
+  await auth.mouse.move(500, 400);
+  await auth.mouse.move(520, 420);
+  await auth.waitForTimeout(200);
+  check('moving the mouse cancels the warning and restores a full five minutes',
+    (await auth.evaluate(() => window.Keys.Auth.checkIdle())) === 'active');
+
+  /* The forced reload must not be stoppable by the browser's "leave site?"
+   * prompt. That prompt fires whenever State.dirty is set, and it would leave
+   * the tab signed in with the newsletter on screen — precisely the situation
+   * the timeout exists to prevent. */
+  let blockingDialogs = 0;
+  const countDialog = async d => { blockingDialogs++; await d.dismiss(); };
+  auth.on('dialog', countDialog);
+
+  await auth.evaluate(() => {
+    window.Keys.State.set('masthead.motto', 'TYPED BUT NOT SAVED BY HAND');
+    window.Keys.State.dirty = true;      // as if mid-edit
+  });
+
+  await auth.evaluate(back => {
+    const k = window.Keys.Auth.SESSION_KEY;
+    const s = JSON.parse(sessionStorage.getItem(k));
+    s.lastSeen = Date.now() - back;
+    sessionStorage.setItem(k, JSON.stringify(s));
+    window.Keys.Auth.checkIdle();
+  }, 5 * 60 * 1000 + 1000);
+
+  await auth.waitForFunction(
+    () => !document.getElementById('auth-gate').hidden,
+    null, { timeout: 10000 });
+  await auth.waitForTimeout(700);
+  auth.off('dialog', countDialog);
+
+  const expired = await auth.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    signedIn: !!window.Keys.Auth.currentUser(),
+    session: sessionStorage.getItem(window.Keys.Auth.SESSION_KEY),
+    title: document.getElementById('auth-title').textContent,
+    note: document.getElementById('auth-note').textContent,
+    noteShown: !document.getElementById('auth-note').hidden,
+    // The app is not booted at the gate, so State.doc is the seed. What
+    // matters is that the edit reached the autosave before the reload.
+    savedMotto: (JSON.parse(
+      localStorage.getItem(window.Keys.State.STORAGE_KEY) || '{}'
+    ).masthead || {}).motto
+  }));
+
+  check('going over five minutes signs the user out and re-locks the app',
+    expired.gateShown && expired.papers === 0 && !expired.signedIn &&
+    expired.session === null,
+    JSON.stringify({ gate: expired.gateShown, papers: expired.papers,
+                     signedIn: expired.signedIn }));
+  check('they are asked to sign in again with their credentials',
+    /sign in/i.test(expired.title), expired.title);
+  check('and told why, so it does not read as a fault',
+    expired.noteShown && /5 minutes without activity/i.test(expired.note),
+    expired.note);
+  check('the "leave site?" prompt cannot block the automatic sign-out',
+    blockingDialogs === 0, blockingDialogs + ' dialog(s) intercepted the reload');
+  check('work in progress is saved before the sign-out, not lost',
+    expired.savedMotto === 'TYPED BUT NOT SAVED BY HAND',
+    'autosaved motto: ' + expired.savedMotto);
+
+  // The explanation is one-shot: it must not greet them on every later visit.
+  await auth.reload({ waitUntil: 'load' });
+  await auth.waitForTimeout(800);
+  check('the explanation shows once, not on every later visit',
+    (await auth.evaluate(() => document.getElementById('auth-note').hidden)) === true);
+
+  // Signing back in must return the work.
+  await auth.fill('#auth-name', 'Head Teacher');
+  await auth.fill('#auth-password', 'a-brand-new-passphrase');
+  await auth.click('#auth-submit');
+  await auth.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 10000 });
+  await auth.waitForTimeout(700);
+  const resumed = await auth.evaluate(() => ({
+    motto: window.Keys.State.get('masthead.motto'),
+    onPage: (document.querySelector(
+      '#page-stage [data-bind="masthead.motto"]') || {}).textContent,
+    idle: window.Keys.Auth.checkIdle()
+  }));
+  check('signing back in restores the newsletter exactly as it was',
+    resumed.motto === 'TYPED BUT NOT SAVED BY HAND' &&
+    resumed.onPage === 'TYPED BUT NOT SAVED BY HAND',
+    JSON.stringify(resumed));
+  check('the new session starts with a full idle budget',
+    resumed.idle === 'active', resumed.idle);
+
+  /* The timer is not the only enforcement: a tab that was asleep (or whose
+   * timers were throttled to a crawl while backgrounded) must still be signed
+   * out on the way back in, from the stored stamp alone. */
+  await auth.evaluate(back => {
+    const k = window.Keys.Auth.SESSION_KEY;
+    const s = JSON.parse(sessionStorage.getItem(k));
+    s.lastSeen = Date.now() - back;
+    sessionStorage.setItem(k, JSON.stringify(s));
+  }, 5 * 60 * 1000 + 5000);
+  await auth.reload({ waitUntil: 'load' });
+  await auth.waitForTimeout(900);
+  const staleOnLoad = await auth.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    note: document.getElementById('auth-note').textContent
+  }));
+  check('an idle session is refused on load too, not only by the timer',
+    staleOnLoad.gateShown && staleOnLoad.papers === 0 &&
+    /without activity/i.test(staleOnLoad.note),
+    JSON.stringify(staleOnLoad));
+
   /* --- a corrupt account store ------------------------------------------- */
   section('Accounts — corrupt or hostile storage');
 
@@ -3855,6 +4021,157 @@ async function main() {
     authErrors.length === 0, authErrors.slice(0, 4).join(' | '));
 
   await authCtx.close();
+
+  /* ---------------------------------------------------- insecure context --
+   * The failure mode that matters on a server. `crypto.subtle` only exists in
+   * a SECURE CONTEXT: https://, localhost, or a file opened from disk. Serve
+   * the site over plain http:// on a VM and it disappears — so the gate has to
+   * stand down, and the whole feature silently vanishes.
+   *
+   * That silence was a real defect: the explanation lived inside the gate, and
+   * the gate was then hidden, so a deployment with accounts switched off
+   * looked identical to accounts being broken. These checks pin the loud
+   * behaviour down.
+   *
+   * `crypto.subtle` is removed before any page script runs, which reproduces
+   * the condition exactly and without needing a non-loopback address (every
+   * 127.0.0.0/8 address counts as localhost, so a local server cannot
+   * reproduce it).
+   * ---------------------------------------------------------------------- */
+  section('Accounts — served without a secure context');
+
+  const insecureCtx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
+  await insecureCtx.addInitScript(() => {
+    /* Both halves of the real condition, not just the one that breaks things:
+     * on plain http:// the browser reports an insecure context AND withholds
+     * crypto.subtle. Stubbing only `subtle` would leave diagnose() reporting a
+     * secure context, which is not the state anyone will actually hit. */
+    Object.defineProperty(window, 'isSecureContext',
+      { get: () => false, configurable: true });
+    Object.defineProperty(window.crypto, 'subtle',
+      { get: () => undefined, configurable: true });
+  });
+  const insecure = await insecureCtx.newPage();
+  const insecureWarnings = [];
+  const insecureErrors = [];
+  insecure.on('console', m => {
+    if (m.type() === 'warning') insecureWarnings.push(m.text());
+  });
+  insecure.on('pageerror', e => insecureErrors.push(e.message));
+  await insecure.goto(URL, { waitUntil: 'load' });
+  await insecure.waitForTimeout(900);
+
+  const degraded = await insecure.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    degradedShown: !document.getElementById('auth-degraded').hidden,
+    formHidden: document.getElementById('auth-form').hidden,
+    title: document.getElementById('auth-title').textContent,
+    text: document.getElementById('auth-degraded').textContent,
+    continueButton: !!document.querySelector('[data-auth="continue"]'),
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    diagnosis: window.Keys.Auth.diagnose()
+  }));
+
+  check('accounts switching themselves off is announced, not silent',
+    degraded.gateShown && degraded.degradedShown && degraded.formHidden,
+    JSON.stringify({ gate: degraded.gateShown, notice: degraded.degradedShown,
+                     form: degraded.formHidden }));
+  check('the notice names the cause and the fix',
+    /secure context/i.test(degraded.text) && /https/i.test(degraded.text) &&
+    /localhost/i.test(degraded.text),
+    degraded.text.replace(/\s+/g, ' ').slice(0, 100));
+  check('diagnose() explains it for whoever is looking at a console',
+    /not in a secure context/i.test(degraded.diagnosis.summary) &&
+    degraded.diagnosis.cryptoSubtle === false &&
+    degraded.diagnosis.secureContext === false,
+    degraded.diagnosis.summary);
+  check('and it is logged, since a server admin is usually in devtools',
+    insecureWarnings.some(w => /secure context/i.test(w)),
+    insecureWarnings.slice(0, 2).join(' | '));
+
+  // It must not brick the tool: one click and the newsletter is usable.
+  await insecure.click('[data-auth="continue"]');
+  await insecure.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 10000 });
+  const continued = await insecure.evaluate(() => ({
+    gateHidden: document.getElementById('auth-gate').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    appInert: document.getElementById('app').hasAttribute('inert')
+  }));
+  check('the newsletter is still usable without accounts',
+    continued.gateHidden && continued.papers === 4 && !continued.appInert,
+    JSON.stringify(continued));
+  check('no uncaught errors with accounts switched off',
+    insecureErrors.length === 0, insecureErrors.slice(0, 3).join(' | '));
+
+  await insecureCtx.close();
+
+  /* --------------------------------------------------- setup diagnostics --
+   * "It never asked me to create an administrator." Every way that can happen
+   * has to be answerable without guessing.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — first-run diagnostics and reset');
+
+  const diagCtx = await browser.newContext({ viewport: { width: 1200, height: 900 } });
+  const diag = await diagCtx.newPage();
+  await diag.goto(URL, { waitUntil: 'load' });
+  await diag.waitForTimeout(800);
+
+  const freshDiag = await diag.evaluate(() => window.Keys.Auth.diagnose());
+  check('on a fresh install diagnose() says setup should be showing',
+    /No accounts yet/i.test(freshDiag.summary) && freshDiag.accounts === 0 &&
+    freshDiag.secureContext === true && freshDiag.cryptoSubtle === true,
+    freshDiag.summary);
+  check('it reports the storage, protocol and idle timeout too',
+    freshDiag.localStorage === 'ok' && !!freshDiag.protocol &&
+    freshDiag.idleTimeoutMinutes === 5,
+    JSON.stringify(freshDiag));
+
+  await signIn(diag);
+  const signedInDiag = await diag.evaluate(() => window.Keys.Auth.diagnose());
+  check('once signed in it says so, rather than looking broken',
+    /Already signed in/i.test(signedInDiag.summary) &&
+    signedInDiag.signedIn === true && signedInDiag.accounts === 1,
+    signedInDiag.summary);
+
+  /* The documented way out of "nobody can get in any more". */
+  const afterReset = await diag.evaluate(() => {
+    const S = window.Keys.State;
+    S.set('masthead.title', 'SURVIVES THE ACCOUNT RESET');
+    S.autosave();
+    const message = window.Keys.Auth.resetAllAccounts();
+    return {
+      message,
+      accounts: window.Keys.Auth.users().length,
+      signedIn: !!window.Keys.Auth.currentUser(),
+      newsletterStillSaved: (JSON.parse(
+        localStorage.getItem(S.STORAGE_KEY) || '{}').masthead || {}).title
+    };
+  });
+  check('resetAllAccounts() clears every account and the session',
+    afterReset.accounts === 0 && afterReset.signedIn === false,
+    JSON.stringify(afterReset));
+  check('it does NOT touch the newsletter',
+    afterReset.newsletterStillSaved === 'SURVIVES THE ACCOUNT RESET',
+    String(afterReset.newsletterStillSaved));
+  check('and it says what to do next',
+    /reload/i.test(afterReset.message), afterReset.message);
+
+  await diag.reload({ waitUntil: 'load' });
+  await diag.waitForTimeout(900);
+  const backToSetup = await diag.evaluate(() => ({
+    gateShown: !document.getElementById('auth-gate').hidden,
+    title: document.getElementById('auth-title').textContent,
+    confirmShown: !document.getElementById('auth-confirm-field').hidden,
+    papers: document.querySelectorAll('#page-stage .paper').length
+  }));
+  check('the next load runs first-time setup again',
+    backToSetup.gateShown && /set up/i.test(backToSetup.title) &&
+    backToSetup.confirmShown && backToSetup.papers === 0,
+    JSON.stringify(backToSetup));
+
+  await diagCtx.close();
 
   /* ---------------------------------------------------------------- shots--
    * Screenshots and the PDF must show a PRISTINE document. The tests above

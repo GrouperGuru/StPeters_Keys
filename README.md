@@ -19,6 +19,13 @@ everyone signs in by name and password.
 Deleting an account never deletes the newsletter. Signing out clears the
 session; closing the tab does too.
 
+**You are signed out after 5 minutes of inactivity** and asked to sign in
+again. It's five minutes of *not touching anything* — any typing, clicking,
+scrolling or mouse movement resets the clock, so it will never interrupt you
+mid-article. You get a warning about half a minute before, and your work is
+saved automatically first: sign back in and the issue is exactly as you left
+it, including edits you hadn't saved to a file.
+
 > ### What this does and doesn't protect
 >
 > This app is static files opened straight from disk. **There is no server, so
@@ -36,6 +43,46 @@ session; closing the tab does too.
 > protection; the login as a whole is not.
 >
 > Real access control would need a server. See `docs/SPEC.md` §12.
+
+### Putting it on a server
+
+Accounts need a **secure context** — the browser only allows the password
+cryptography over `https://`, on `localhost`, or when the file is opened
+directly from disk.
+
+**Serving it over plain `http://` on a VM or intranet box switches accounts
+off**, because `crypto.subtle` simply isn't there. The app says so on the
+first screen and in the browser console rather than quietly opening with no
+sign-in. To fix it, do any one of:
+
+- put a certificate on it and serve `https://` (Let's Encrypt, or a self-signed
+  certificate for an internal box);
+- reach it through an SSH tunnel, so the browser sees `localhost`:
+  `ssh -L 8080:localhost:80 user@your-vm`, then open `http://localhost:8080`;
+- or just open `index.html` from disk, which is what the app is designed for.
+
+**Not being prompted to create an administrator?** Open the browser console and
+run:
+
+```js
+Keys.Auth.diagnose()
+```
+
+It reports, in one object, whether the page is in a secure context, whether
+`crypto.subtle` exists, whether storage works, how many accounts there are, and
+a plain-English `summary` of which of those is the reason. The usual answers
+are the `http://` problem above, or that accounts already exist on that browser
+profile — accounts live in that browser's storage, so each machine and each
+profile sets up separately.
+
+To start over — a forgotten administrator password, or a half-finished setup —
+run this in the console and reload:
+
+```js
+Keys.Auth.resetAllAccounts()
+```
+
+It clears every account and **leaves the newsletter untouched**.
 
 ## Using it
 
