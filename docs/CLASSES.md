@@ -48,12 +48,20 @@ Focus highlight for the region bound to the field being edited:
 .rt-out.is-target { background: rgba(255,235,59,.38); box-shadow: 0 0 0 2px #fbc02d; }
 ```
 
-Page margins from the reference: roughly `0.5in` on pages 1–3 and `0.35in` on
-page 4 (the calendar runs closer to the trim).
+Page margins from the reference: roughly `0.5in` on the portrait sheets and
+`0.35in` on the calendar, which runs closer to the trim.
+
+**Key the calendar's margins off `[data-kind="calendar"]`, never
+`[data-page="4"]`.** The page count is dynamic — the user can add announcement
+pages — so ordinals shift and `data-kind` is the only stable identity.
 
 ---
 
-## Page 1 & 2 — `nl-*`
+## Front & announcements, CONTEMPORARY — `nl-*`
+
+This table is the **Contemporary** baseline. `paper.css` §03 declares it with no
+template qualifier, so it also applies under Modern until §03b re-points it —
+see the `nl-m-*` table below for what Modern changes.
 
 | class | styling |
 |---|---|
@@ -81,7 +89,67 @@ page 4 (the calendar runs closer to the trim).
 | `.nl-article-title` | bold serif, centred, uppercase, ~10.5pt, margin ~0 0 .55em |
 | `.nl-article-body` | serif ~10.5pt justified; `p { margin: 0 0 .65em }`; `ul { margin:.4em 0; padding-left: 1.5em; list-style: disc }`; `li { margin-bottom:.3em }`; `.indent { margin: .25em 0 .25em 1.4em }` |
 
-Pages 1 and 2 share `.nl-articles`; page 2 contains only that block.
+The front and announcement sheets share `.nl-articles`; announcement sheets
+contain only that block (plus the Modern running foot).
+
+---
+
+## Front & announcements, MODERN — `nl-m-*`
+
+Selected by `doc.template === 'modern'` (SPEC §3c). **Every selector must be
+qualified by both `[data-template="modern"]` and a `[data-kind]` of `front` or
+`announcements`** — the slips and calendar sheets are shared and must not be
+reachable from here.
+
+Modern face stacks, declared on `.paper[data-template="modern"]`:
+
+```css
+--pf-mod-display: 'Century Gothic', 'Avenir Next', Avenir, Futura,
+                  'Trebuchet MS', 'Segoe UI', Arial, sans-serif;   /* display */
+--pf-mod-body:    'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+```
+
+| class | styling |
+|---|---|
+| `.paper-flow` | **flex column**, padding `0.36in 0.4in 0.26in`; children `flex: 0 0 auto` (see the note below) |
+| `.nl-m-head` | `border-bottom: 3px solid #000` — the thick half of the reference's double rule |
+| `.nl-m-titlerow` | flex, `align-items: baseline`, centred; title + volume share a baseline |
+| `.nl-title` | display face **700**, ~4.6em, `text-transform: none` (Modern prints the title as typed) |
+| `.nl-m-volume` | ~0.86em, right-aligned, `max-width: 34%`, `overflow-wrap: anywhere`. **Never `white-space: nowrap`** |
+| `.nl-m-dateband` | 1.5px rules top and bottom — the thin half of the double rule, plus the band under the date |
+| `.nl-date` | display face **400** (light, not bold), ~4.05em, centred, uppercase |
+| `.nl-tagline` | display face 700, ~1.42em, centred, uppercase, **not italic**, `border-bottom: 1.5px` |
+| `.nl-m-cols` | 3-col grid `minmax(0,28fr) minmax(0,41fr) minmax(0,33fr)`, gutter 0.17in, `align-items: start` |
+| `.nl-m-aside` / `.nl-m-main` / `.nl-rail` | flex columns, `min-width: 0`; aside gap 0.16in, rail gap 0.3in |
+| `.nl-m-blocktitle` | display face 700, ~1.42em, centred, uppercase, `border-bottom: 2px solid #000` — the Modern signature, shared with `.nl-heading` and `.nl-article-title` so they align optically |
+| `.nl-m-blocktitle--intro` | weight 400, ~1.95em, mixed case (the "Introducing the NEW KEYS!" heading) |
+| `.nl-m-blocktitle--bare` | as `--intro` but **no rule** ("Bible Inspo:" carries none in the reference) |
+| `.nl-m-blockbody` | ~1em justified, `hyphens: auto`, `p { margin: 0 0 1em }` |
+| `.nl-heading` | ruled like `.nl-m-blocktitle` but weight 400, ~1.95em, mixed case |
+| `.nl-m-emblem` | centred flex; `svg { width: 78%; max-width: 1.75in }` so decoration is what gives up space first |
+| `.nl-m-lines` | `min-width: 0` |
+| `.nl-m-line` | one entry per line, centred, ~1.06em, `margin-bottom: 0.35em` |
+| `.nl-m-line-date` / `-event` | `display: inline` — the date runs straight into the event text, not a table cell |
+| `.nl-schoolinfo` | `padding-left: 0` (Contemporary indents it 0.35in), left-aligned, ~1.06em |
+| `.nl-articles` (front) | `display: block`, `margin-top: 0.26in`; sections spaced 0.22in |
+| `.nl-articles` (announcements) | `column-count: 2`, `column-gap: 0.33in`, **`column-fill: balance` with auto height** |
+| `.nl-article` (announcements) | `break-inside: avoid`, `margin-bottom: 0.4in`, none on `:last-child` |
+| `.nl-m-foot` | grid `1fr auto 1fr`, `margin-top: auto`, `border-top: 1.5px solid #000` |
+| `.nl-m-foot-site` | `grid-column: 2`, centred on the **sheet** |
+| `.nl-m-foot-num` | `grid-column: 3`, `justify-self: end`, tabular numerals |
+
+Three rules here are load-bearing for the overflow guarantee, not cosmetic:
+
+- **`.paper-flow` children are `flex: 0 0 auto`.** A shrinkable flex item
+  absorbs an overflow instead of showing it, and tier 2 only shrinks the page
+  when it can *see* one.
+- **`margin-top: auto` on the foot** is what pins it to the bottom. When the
+  sheet is over-full the auto margin collapses and the foot is pushed past the
+  trim — which is exactly what makes the overflow measurable.
+- **`column-fill: balance` with AUTO height** on the announcements list. With a
+  definite height the overflow spills sideways into a third, clipped column;
+  balancing to auto height makes it grow downwards, the direction tier 2
+  shrinks against.
 
 ---
 

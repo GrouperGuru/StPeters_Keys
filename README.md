@@ -12,12 +12,44 @@ preview on the right. Everything you type appears on the page immediately.
 
 **The toolbar** across the top holds everything: **Save**, **Load** and **PDF**,
 the text formatting controls (bold, italic, underline, font, size, alignment,
-bullets), the light/dark theme button, the zoom control, and the page arrows.
+bullets), the **template** dropdown, the light/dark theme button, the zoom
+control, and the page arrows.
 
 The editing rail opens as a collapsed list of the four pages, so you start with
 an overview rather than a wall of fields. Click a page's header to open it.
 Reloading returns to that collapsed view; your content is kept, the open/closed
-state is not.
+state is not. An open section keeps its title pinned to the top of the rail
+while you scroll through its fields, so you can always see which page you are
+editing.
+
+## Templates
+
+The **template** dropdown in the toolbar picks the page layout:
+
+- **Contemporary** — the long-standing look. Serif type, one wide column with
+  a ruled *This Week* / *Looking Ahead* rail down the right, and full-width
+  announcement sections.
+- **Modern** — sans-serif. The front page runs three columns: an introduction,
+  the cross-and-book emblem and *Bible Inspo* on the left, Classroom Corner in
+  the middle, and the agendas plus a *Contact Us* block on the right. There is
+  a large date band under the masthead, ruled section headings, and a running
+  foot with the website and page number. Announcement pages run two columns.
+
+**The lunch slips and calendar pages are the same in both** — only the front
+and announcement pages change.
+
+Switching is safe and reversible: it is one document with two presentations, so
+nothing is converted, copied or thrown away. Each template needs a few fields
+the other doesn't (Modern has the introduction, *Bible Inspo* and volume line;
+Contemporary has the motto and the Classroom Corner verse), and the editing
+rail shows only the ones the current template prints. The rest are still in
+your newsletter and come straight back when you switch. The choice is saved
+with the file, so a newsletter always reopens in the layout it was built for.
+Files saved before templates existed open as Contemporary.
+
+Because Modern divides the front page into three narrower columns, it holds
+less text at full size than Contemporary does. A very full issue will be shrunk
+to fit rather than spill — see the note about auto-shrinking below.
 
 **Light and dark theme** follow your operating system until you press the theme
 button, after which your choice is remembered and wins on every visit. The
@@ -46,6 +78,17 @@ The two panes are linked both ways:
   preview.
 - **Clicking into a field** turns the preview to that page and highlights the
   region it feeds.
+- **Drag sections around the preview.** Hover a section and a grip appears at
+  its top-left corner; drag it to a new position and a blue line shows where it
+  will land. Announcements, lunch-slip boxes and the *This Week* / *Looking
+  Ahead* boxes can all be moved. Drag an announcement onto a **page thumbnail**
+  to send it to that page. The grip is a button, so you can also just focus it
+  and use the arrow keys.
+
+  Sections move between slots rather than to free positions, so they can never
+  overlap. And every move is checked: if it would push a page past what will
+  fit, or shrink the text too far to read, the move is undone and you are told
+  why.
 
 The numbered badges beside each section heading, and the thumbnails under the
 preview, also jump between pages.
@@ -55,13 +98,29 @@ won't lose the issue. **Save** writes a `.json` file you can keep, e-mail, or
 reload later with **Load**. Older save files from the previous version of this
 tool still load.
 
-## The four pages
+**Save** and **PDF** both ask for a file name first, and suggest one built from
+the date on page 1 — `SP_Keys-May26_2026` for the 26 May 2026 issue. The
+suggestion is greyed-out placeholder text, so you can press `Enter` to take it
+or just start typing to replace it. For a PDF the name is what the browser's
+own print dialog will suggest once you choose **Save as PDF** as the
+destination; you can still change it there.
+
+## The pages
 
 1. **Front page** — masthead, Classroom Corner article, and the *This Week* and
-   *Looking Ahead* boxes, followed by full-width announcement sections.
-2. **Announcements** — more full-width sections. Add, remove and reorder them
-   freely.
-3. **Lunch slips and forms** — the tear-off boxes. Add or remove whole boxes
+   *Looking Ahead* boxes, followed by full-width announcement sections. Modern
+   adds an introduction block, the emblem and *Bible Inspo* down the left.
+2. **Announcements** — more sections, full width under Contemporary and two
+   columns under Modern. Add, remove and reorder them freely.
+
+   Long issues can run to **as many announcement pages as you need**. Use
+   **+ Add page** at the end of the thumbnail strip under the preview, or the
+   button at the bottom of the Announcements section in the editor. New pages
+   are inserted after the existing announcements, and the Lunch Slips and
+   Calendar pages renumber themselves. Each page has its own group of sections
+   in the editor, with an ✕ to remove it; the issue always keeps at least one.
+3. **Lunch slips and forms** — the same under both templates. The tear-off
+   boxes. Add or remove whole boxes
    with **+ Lunch Slip**, **+ After School Sign Up**, **+ Custom Box** and
    **+ Starburst**; the input fields follow whatever boxes exist.
 
@@ -75,10 +134,10 @@ tool still load.
    add or remove rate/policy lines and set how many sign-up lines to print.
 
    *Custom Box* remains for anything the structured boxes don't cover.
-4. **Monthly calendar** — pick the month and year from the dropdowns and the
-   grid rebuilds itself, always running Sunday through Saturday with the right
-   number of week rows. Events are stored per calendar date, so switching months
-   and back never loses anything.
+4. **Monthly calendar** — also the same under both templates. Pick the month
+   and year from the dropdowns and the grid rebuilds itself, always running
+   Sunday through Saturday with the right number of week rows. Events are
+   stored per calendar date, so switching months and back never loses anything.
 
 Text is shrunk automatically to stay inside its box, so nothing ever runs off
 the edge of a printed page. If a box is pushed to its smallest size it gets a
@@ -90,7 +149,10 @@ this for you.
 ## Layout reference
 
 `docs/pg-1.png` … `docs/pg-4.png` are renders of the May 2026 issue
-(`reference/keys_may_25.pdf`), which the layout is modelled on.
+(`reference/keys_may_25.pdf`), which the **Contemporary** layout is modelled on.
+
+The **Modern** layout is modelled on `reference/Keys_Modern-Page1.png` (front)
+and `reference/Keys_Modern-Page2.png` (announcements).
 
 ## Project layout
 
@@ -104,6 +166,7 @@ assets/js/fit.js        shrink-to-fit engine (overflow prevention)
 assets/js/flip.js       page-turn animation, zoom and fit-to-view
 assets/js/calendar.js   page 4
 assets/js/slips.js      page 3
+assets/js/arrange.js    drag-to-reorder sections, with the overflow guard
 assets/js/render.js     builds the preview pages
 assets/js/editor.js     builds the editing rail
 assets/js/app.js        bootstrap and event wiring

@@ -13,9 +13,9 @@ depend on them by string.
   ships in-repo.
 - Every module attaches itself to the `window.Keys` namespace:
   `Keys.State`, `Keys.Fit`, `Keys.Flip`, `Keys.Calendar`, `Keys.Slips`,
-  `Keys.Render`, `Keys.Editor`, `Keys.App`.
+  `Keys.Arrange`, `Keys.Render`, `Keys.Editor`, `Keys.App`.
 - Script load order (already wired in `index.html`):
-  `state.js → fit.js → flip.js → calendar.js → slips.js → render.js → editor.js → app.js`
+  `state.js → fit.js → flip.js → calendar.js → slips.js → arrange.js → render.js → editor.js → app.js`
   A module may reference another module's functions **only inside functions that
   run after `DOMContentLoaded`**, never at top level.
 - Target: current Chrome/Edge/Safari/Firefox. `document.execCommand` is used for
@@ -103,14 +103,63 @@ which mutates, then re-renders editor + preview, restores focus, and refits.
 
 ## 3. Page geometry
 
-Trim sizes come from the reference PDF (`docs/pg-1..4.png`):
+**The page count is data, not a constant.** An issue is Front + *N* announcement
+pages + Slips + Calendar, where *N* ≥ 1 (`articles.pages.length`, capped at
+`Keys.State.MAX_ANNOUNCEMENT_PAGES`). Adding a page renumbers everything after
+it.
 
-| Page | Content | Orientation | Size |
+| Kind | Content | Orientation | Size |
 |---|---|---|---|
-| 1 | Masthead, Classroom Corner, This Week, Looking Ahead, articles | portrait | 8.5in × 11in |
-| 2 | Full-width article sections | portrait | 8.5in × 11in |
-| 3 | Lunch slips / sign-up boxes (2 columns) | portrait | 8.5in × 11in |
-| 4 | Monthly calendar | **landscape** | 11in × 8.5in |
+| `front` | Masthead, Classroom Corner, This Week, Looking Ahead, articles | portrait | 8.5in × 11in |
+| `announcements` (×N) | Article sections | portrait | 8.5in × 11in |
+| `slips` | Lunch slips / sign-up boxes (2 columns) | portrait | 8.5in × 11in |
+| `calendar` | Monthly calendar | **landscape** | 11in × 8.5in |
+
+The `front` and `announcements` sheets have **two layouts**, chosen by
+`doc.template` — see §3c. `slips` and `calendar` are shared by both.
+
+### `data-page` vs `data-kind` — do not confuse them
+
+```html
+<div class="paper" data-page="5" data-kind="calendar" data-orientation="landscape">
+```
+
+- `data-page` is the **ordinal**. It shifts whenever an announcement page is
+  added or removed, so nothing may key off a literal value.
+- `data-kind` is the **stable identity**. CSS and any logic meaning "the
+  calendar" must use it. `paper.css` keys the calendar's page margins off
+  `[data-kind="calendar"]`; keying them off `[data-page="4"]` silently broke
+  the moment a page was inserted.
+
+`Keys.Render.pages()` is the single source of truth:
+
+```js
+Keys.Render.pages()        // [{ n, kind, name, short, orientation, listPath? }]
+Keys.Render.count()        // sheet count
+Keys.Render.pageAt(n)      // descriptor for a 1-based ordinal
+Keys.Render.ordinalOf(kind)// first ordinal of a kind, or 0
+Keys.App.totalPages()      // same count, for the pager
+```
+
+`slips.js` and `calendar.js` still emit `data-page="3"` / `"4"` on their editor
+fields. `Keys.Editor` corrects those in one pass (`syncFieldPages`) from each
+section's badge, so those modules never need to know the ordinal.
+
+### Adding and removing announcement pages
+
+```
+data-act="page-add"                          // toolbar rail + editor button
+data-act="page-del" data-page-index="<i>"    // per-page, editor only
+```
+
+- The **preview rail** carries an `+ Add page` shortcut (`.thumb--add`); it is
+  *not* a `[data-page]` navigation target and must be excluded from the
+  thumbnail click handler.
+- Removing a page confirms first if it has content.
+- The last announcement page cannot be removed, and its delete button is not
+  rendered at all — an issue always has at least one.
+
+## 3a. Legacy save files
 
 Paper markup — **produced by `render.js`, styled by `paper.css`**:
 
@@ -217,6 +266,178 @@ Styling notes drawn from `docs/pg-1.png` / `docs/pg-2.png`:
   and below. `.nl-article-body p` justified.
 - `.nl-article-body ul` uses `disc` markers with hanging indent; `.indent` inside
   a `<li>` indents a sub-block without a marker.
+
+## 3c. Templates → `Keys.State.template()`
+
+A **template** is the layout of the front and announcement sheets. Two exist:
+
+| id | Name | Front | Announcements | Reference |
+|---|---|---|---|---|
+| `contemporary` | Contemporary | serif, 1 wide column + ruled rail | 1 full-width column | `reference/keys_may_25.pdf` |
+| `modern` | Modern | geometric sans, 3 columns | 2 columns | `reference/Keys_Modern-Page1.png`, `-Page2.png` |
+
+`contemporary` is the default and what every save file predating templates
+opens as — that is the layout those issues were authored for.
+
+**The slips and calendar sheets are shared and must stay byte-identical
+across templates.** `tools/verify.js` asserts this on `.paper-flow.innerHTML`,
+which catches a stray class or attribute as readily as a layout change.
+
+### The rules that make switching safe
+
+1. **One document, two presentations.** `doc.template` selects a layout; it
+   never converts, copies or discards content. Switching is a plain
+   `Keys.App.structuralChange` — `verify.js` asserts the document is
+   byte-identical before and after a round trip.
+2. **`template` lives in the document**, not `localStorage`: it changes the
+   printed artefact, so it has to travel with the save file (unlike the
+   light/dark theme, which does not).
+3. **Only the front page's markup forks.** Announcement sheets share one
+   markup tree and differ in CSS alone. That is what keeps `arrange.js` and
+   click-to-edit working identically on both, with no per-template branches.
+4. **Every sheet carries `data-template`**, including the two the template does
+   not change, so a selector never has to combine kind and template to decide
+   whether it may apply.
+5. **The id is validated in `normalizeDoc`.** It reaches CSS selectors and a
+   renderer dispatch, so an unknown id from a hand-edited file falls back to
+   `contemporary` rather than rendering blank sheets. `setTemplate` returns the
+   id actually in effect.
+
+```js
+Keys.State.templates()      // [{ id, name, note }] in toolbar order
+Keys.State.template()       // active id, always one of the above
+Keys.State.setTemplate(id)  // returns the id NOW IN EFFECT (may reject)
+Keys.App.chooseTemplate(id) // the UI path: switch + re-render + toast
+```
+
+The toolbar dropdown is `#template-select`, filled by `app.js` from
+`State.templates()` so the list has one source. `syncTemplateSelect()` runs
+after every structural change, because loading a file can bring a different
+template with it.
+
+### Which fields each template renders
+
+The editor rail shows **only what the active template prints**, plus a lead
+hint naming the template. Everything else stays in the document untouched and
+reappears on switching back.
+
+| Field | Contemporary | Modern |
+|---|---|---|
+| `masthead.tagline` / `.title` / `.date` / `.schoolInfo` | ✓ | ✓ |
+| `masthead.sectionHeading`, `classroom.body` / `.signature` | ✓ | ✓ |
+| `thisWeek.*`, `lookingAhead.*`, `railOrder`, `articles.*` | ✓ | ✓ |
+| `masthead.motto` | ✓ | — |
+| `classroom.verse` | ✓ | — |
+| `masthead.volume`, `masthead.contactHeading` | — | ✓ |
+| `intro.heading` / `.body`, `bible.heading` / `.body` | — | ✓ |
+| `footer.site`, `modern.emblem` | — | ✓ |
+
+`masthead.title` and `masthead.sectionHeading` are stored in **title case**.
+`text-transform` belongs to the template, not the content: Contemporary prints
+them in capitals, Modern as typed. Storing `"ST. PETER'S KEYS"` would make it
+impossible for any template to recover mixed case.
+
+### Modern markup (emitted by `render.js` — style against this)
+
+```html
+<div class="paper" data-page="1" data-kind="front" data-template="modern"
+     data-orientation="portrait" data-fit-page>
+  <div class="paper-flow">          <!-- flex COLUMN under Modern -->
+
+    <header class="nl-m-head">
+      <div class="nl-m-titlerow">
+        <div class="nl-title      rt-out" data-bind="masthead.title">
+        <div class="nl-m-volume   rt-out" data-bind="masthead.volume">
+      </div>
+    </header>
+    <div class="nl-m-dateband">
+      <div class="nl-date         rt-out" data-bind="masthead.date">
+    </div>
+    <div class="nl-tagline        rt-out" data-bind="masthead.tagline">
+
+    <div class="nl-m-cols">         <!-- 3-col grid: 28fr 41fr 33fr -->
+      <aside class="nl-m-aside">
+        <section class="nl-m-block">
+          <div class="nl-m-blocktitle nl-m-blocktitle--intro rt-out" data-bind="intro.heading">
+          <div class="nl-m-blockbody  rt-out" data-bind="intro.body">
+        </section>
+        <div class="nl-m-emblem" aria-hidden="true"><svg>…</svg></div>
+        <section class="nl-m-block">
+          <div class="nl-m-blocktitle nl-m-blocktitle--bare rt-out" data-bind="bible.heading">
+          <div class="nl-m-blockbody rt-out" data-bind="bible.body">
+        </section>
+      </aside>
+
+      <div class="nl-m-main">
+        <div class="nl-heading rt-out" data-bind="masthead.sectionHeading">
+        <div class="nl-body    rt-out" data-bind="classroom.body">
+        <div class="nl-sign    rt-out" data-bind="classroom.signature">
+      </div>
+
+      <aside class="nl-rail" data-drop="rail">
+        <section class="nl-m-block" data-move="rail" data-move-key="thisWeek" …>
+          <div class="nl-m-blocktitle rt-out" data-bind="thisWeek.heading">
+          <div class="nl-m-lines">
+            <p class="nl-m-line">
+              <span class="nl-m-line-date  rt-out" data-bind="thisWeek.rows.0.date">
+              <span class="nl-m-line-event rt-out" data-bind="thisWeek.rows.0.event">
+            </p>
+          </div>
+        </section>
+        <!-- …lookingAhead, then the contact block (NO data-move) -->
+        <section class="nl-m-block nl-m-contact">
+          <div class="nl-m-blocktitle rt-out" data-bind="masthead.contactHeading">
+          <div class="nl-schoolinfo   rt-out" data-bind="masthead.schoolInfo">
+        </section>
+      </aside>
+    </div>
+
+    <div class="nl-articles" data-drop="article" data-drop-list="articles.page1">…</div>
+
+    <div class="nl-m-foot">        <!-- margin-top:auto pins it to the bottom -->
+      <span class="nl-m-foot-site rt-out" data-bind="footer.site">
+      <span class="nl-m-foot-num">1</span>     <!-- DERIVED: no data-bind -->
+    </div>
+  </div>
+</div>
+```
+
+Load-bearing details, each of which was a bug first:
+
+- **The Modern rail box has no `[data-fit]`.** Tier 1 needs a definite height
+  to measure against and the Modern rail has none — the entries just flow.
+  Wrapping it in a `.fit` box with auto height is *worse than useless*:
+  `clientHeight` would always equal `scrollHeight`, so tier 1 would report
+  success while doing nothing. A long rail is tier 2's job.
+- **`.paper-flow` is a flex column** so the running foot can sit at the bottom
+  with `margin-top: auto`. Its children are `flex: 0 0 auto` deliberately: a
+  shrinkable item would absorb an overflow, and tier 2 only shrinks the page
+  when it can *see* one.
+- **The announcements sheet uses `column-count: 2` with `column-fill: balance`
+  and auto height.** With a *definite* height the overflow would spill sideways
+  into a third, clipped column; balancing to auto height makes an over-long
+  issue grow downwards, which is the direction tier 2 shrinks against.
+- **No `white-space: nowrap` anywhere on the sheet.** `.nl-m-volume` had it, to
+  keep the reference's short "Volume 1, Issue 1 2026" on one line, and it made
+  that the one region no amount of shrinking could fit: a long value became an
+  unbreakable line that pushed the whole page off the paper sideways. It is
+  `max-width: 34%` + `overflow-wrap: anywhere` instead.
+- **`articles.page1` still renders full-width beneath the columns.** The Modern
+  reference has no such region because that issue had none; dropping the list
+  would silently lose content, and the columns already run the full height when
+  it is empty.
+- **The emblem is chrome, not content**: `aria-hidden`, no `data-bind`, so
+  click-to-edit ignores it. `modern.emblem` turns it off.
+- **The page number is derived** from the ordinal and carries no `data-bind` —
+  there is nothing to edit.
+
+`paper.css` §03 is written *without* a template qualifier and is therefore the
+Contemporary baseline; §03b re-points what Modern changes. Anything in §03 that
+Modern must not inherit has to be overridden in §03b rather than made
+conditional in §03 — that keeps Contemporary's cascade exactly as it was before
+templates existed. Every §03b selector is qualified by **both**
+`data-template="modern"` and a `data-kind` of front or announcements, so the
+shared sheets cannot be reached from there.
 
 ## 4. `fit.js` — overflow prevention  → `Keys.Fit`
 
@@ -454,6 +675,87 @@ no-op (a confirmed delete that did nothing, in particular).
 Per-day state is driven by the generic `.pt` select binding
 (`data-path="slips.<i>.days.<d>"`), not a `data-act`.
 
+## 11. `arrange.js` — move sections around the preview  → `Keys.Arrange`
+
+**Reorder, not free positioning.** Dragging to arbitrary x/y would guarantee
+overlap and spill on a fixed sheet, which is precisely what must not happen. A
+drag moves a block to a new SLOT in the page flow, so blocks reflow around each
+other and overlap is impossible by construction.
+
+### Markup contract (emitted by `render.js` / `slips.js`)
+
+```html
+<!-- draggable block -->
+<article class="nl-article" data-move="article"
+         data-move-key="articles.page1:0" data-move-label="FIELD DAY">
+<div class="slip" data-move="slip" data-move-key="<slipId>" data-move-label="…">
+<section class="nl-box" data-move="rail" data-move-key="thisWeek" …>
+
+<!-- drop container -->
+<div class="nl-articles" data-drop="article" data-drop-list="articles.page1">
+<div class="slip-col"   data-drop="slip"    data-drop-col="left">
+<aside class="nl-rail"  data-drop="rail">
+```
+
+A block may only be dropped into a container of the same `kind`. `data-move-key`
+identifies it *within that kind*: a `list:index` pair for articles, the slip id
+for slips, the state key for rail boxes.
+
+### Slot indices are EXCLUSION coordinates
+
+`slotAt()` returns an index among the container's blocks **with the dragged one
+already removed**. Consequences that are easy to get wrong:
+
+- the slot that reproduces the current arrangement is exactly `fromIndex`;
+- after `splice`-ing the block out, the index needs **no** shift correction.
+
+Both `applyArticle` and `applyRail` originally used inclusive-index arithmetic
+here and silently refused legitimate moves.
+
+### The overflow guard
+
+Every drop is provisional. `commit(mutate)` snapshots the document, applies,
+re-renders, refits, and rolls back if the layout got worse — where "worse" is
+any of:
+
+- a page that now overflows and did not before;
+- more boxes pinned at their shrink-to-fit minimum;
+- a page newly pushed below `MIN_COMFORTABLE_SCALE` (0.8).
+
+That last one matters: the fit engine will happily scale a page to 0.5 to make
+anything "fit", so testing overflow alone would let a drop crush a whole page
+to unreadable type and report success.
+
+### Cross-page moves
+
+Only one sheet is visible at a time, so a block cannot be dragged onto a page
+that is off screen. Dragging an announcement over a **page thumbnail** moves it
+to that page's list; the thumbnail lights up (`.thumb.is-drop-target`) and the
+preview follows the block after the drop.
+
+### Chrome, not paper
+
+The handle (`#arrange-handle`) and drop indicator (`#arrange-indicator`) live in
+`#arrange-layer` inside `#preview-pane` — **never inside `.paper`**. Anything
+injected into `.paper-flow` would be measured by the fit engine and would have
+to be stripped for print. `print.css` therefore needs no rules for them.
+
+### API
+
+```js
+Keys.Arrange.init()                 // idempotent; delegates from #page-stage
+Keys.Arrange.refresh()              // after a re-render: drop stale handles
+Keys.Arrange.slotAt(x, y, kind, draggedEl)
+Keys.Arrange.apply(blockEl, target) // target: { container, index }
+Keys.Arrange.commit(mutate, toast)  // guarded; -> true if the move stuck
+Keys.Arrange.overflowSignature()
+Keys.Arrange.debugState()
+```
+
+The handle is a real `<button>`: arrow keys move a block one slot, and
+left/right send it to the other container (column, or page). Dragging is never
+the only way to move something.
+
 ## 8. CSS files
 
 ### `assets/css/app.css` — application shell (screen only)
@@ -567,9 +869,52 @@ Calm, professional, dense-but-legible desktop tool. Not a toy.
   </main>
 
 </div>
+
+<!-- Save and PDF both ask for a file name first. -->
+<dialog id="name-dialog" class="dlg" aria-labelledby="name-dialog-title">
+  <form id="name-dialog-form" class="dlg-form">
+    <h2 class="dlg-title" id="name-dialog-title">Save newsletter</h2>
+    <p class="dlg-note" id="name-dialog-note"></p>
+    <label class="dlg-label" for="name-dialog-input">File name</label>
+    <div class="dlg-inputwrap">
+      <input type="text" id="name-dialog-input" class="dlg-input">
+      <span class="dlg-ext" id="name-dialog-ext" aria-hidden="true">.json</span>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="tb-btn" data-dlg="cancel">Cancel</button>
+      <button type="submit" class="tb-btn tb-btn--primary" id="name-dialog-ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toasts" aria-live="polite"></div>
 </body>
 ```
+
+**The file-name dialog** (`Keys.App.askFilename`). Every id above is
+load-bearing — `app.js` retitles the dialog and swaps the extension and the
+confirm label for each action, so the markup is written once and reused.
+
+- `askFilename({ title, note, ext, okLabel, suggestion })` resolves with the
+  cleaned name, or **`null` if the user cancelled**. Callers must treat `null`
+  as "do nothing" — never as "use the default".
+- The suggestion is the input's **placeholder**, not its value: the field opens
+  empty so typing needs no clearing, and submitting empty accepts the
+  suggestion.
+- `Keys.App.suggestedName()` → `"SP_Keys-" + <the page-1 date>`, e.g.
+  `SP_Keys-May26_2026`. `masthead.date` is free rich text, so it is parsed for
+  a month/day/year triple, then falls back to the whole line with punctuation
+  folded to `_`, then to today's date.
+- `Keys.App.cleanFilename(typed, fallback)` strips control characters and path
+  separators, folds the Windows-reserved set to `-`, refuses a leading dot, and
+  caps the length. Anything falsy becomes `fallback`.
+- **PDF naming is advisory.** There is no API for setting a PDF file name — the
+  browser's own "Save as PDF" dialog seeds it from `document.title`. `app.js`
+  parks the chosen name there for the duration of the print and restores it on
+  `afterprint` (with a window-`focus` backstop). It must **not** be restored
+  immediately after `print()` returns: browsers disagree on whether `print()`
+  blocks, so that would be a race the feature loses silently.
+- No `<dialog>` support falls back to `window.prompt()`.
 
 Editor section / field markup (emitted by `editor.js`, and by
 `Keys.Slips.editorHTML` / `Keys.Calendar.editorHTML`):
@@ -614,6 +959,23 @@ Editor section / field markup (emitted by `editor.js`, and by
   </div>
 </section>
 ```
+
+**Open sections pin their header.** `.ed-section.is-open > .ed-head` is
+`position: sticky`, so the title stays in view while its body scrolls past.
+Two constraints follow, and both are easy to break by accident:
+
+- `.ed-section` must **not** be `overflow: hidden`. That would make each
+  section its own scrollport, and a sticky header inside a non-scrolling
+  scrollport never sticks at all — silently. The rounded corners it used to
+  clip are declared on `.ed-head` and `.ed-body` instead.
+- Sticky offsets are measured from the scroller's **padding** box, so
+  `top: 0` would pin one `--rail-pad-top` below the visible edge and leave a
+  gap for content to scroll through. `#editor-scroll` owns that variable and
+  the header cancels it with `top: calc(-1 * var(--rail-pad-top))`.
+
+Every `.ed-head` background must stay a **fully opaque** token — fields scroll
+underneath it. Fields carry `scroll-margin-top` so a jump-to-field
+(`Editor.focusPath`) cannot park one behind the pinned header.
 
 Other chrome classes: `.pt` (plain `<input>`/`<select>`), `.ed-check`
 (checkbox + label row), `.ed-inline` (horizontal control cluster),

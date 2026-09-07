@@ -15,11 +15,16 @@
   var Keys = global.Keys = global.Keys || {};
   var State = Keys.State;
 
-  var TOTAL_PAGES = 4;
-  /* Full names go in title/aria-label; the short ones are the visible captions
-   * under the page thumbnails, which have limited width. */
-  var PAGE_NAMES = { 1: 'Front Page', 2: 'Announcements', 3: 'Lunch Slips', 4: 'Calendar' };
-  var PAGE_SHORT = { 1: 'Front', 2: 'Notices', 3: 'Slips', 4: 'Calendar' };
+  /* The issue is Front + N announcement pages + Slips + Calendar, so the page
+   * count is derived from the document, never assumed. Keys.Render.pages() is
+   * the single source of truth; everything here reads it. */
+  function pageList() {
+    return (Keys.Render && Keys.Render.pages) ? Keys.Render.pages() : [];
+  }
+  function totalPages() {
+    var n = pageList().length;
+    return n || 1;
+  }
 
   /* Selection tracking so the toolbar can format the last-focused field even
    * after focus moves to a toolbar <select>. */
@@ -103,7 +108,14 @@
    * text happens to sit. A calendar day is mostly empty space under a short
    * event line, and a slip has generous padding — requiring a hit on the glyphs
    * themselves would make the feature feel broken. */
+  /* `closest()` returns the NEAREST ancestor matching any of these, and
+   * bindTargetFromClick then widens outwards only if that one holds no bound
+   * region. So listing both an inner and an outer block is deliberate and
+   * order-independent: a click on a Modern agenda entry lands on `.nl-m-line`
+   * (that exact entry), and a click on the blank space beside it falls out to
+   * `.nl-m-block` and then the column, picking the nearest region in each. */
   var CLICK_BLOCKS = '.cal-cell, .slip, .nl-article, .nl-box, .nl-agenda tr,' +
+    ' .nl-m-line, .nl-m-block, .nl-m-aside, .nl-m-main, .nl-m-foot,' +
     ' .nl-rail, .nl-top-main, .cal-titlebox, .paper-flow';
 
   /* Two kinds of click target:
@@ -205,7 +217,11 @@
     // Re-observe: Render.all() replaced every .paper node, so the previous
     // ResizeObserver targets are detached. init() is idempotent and re-binds.
     if (Keys.Fit) { Keys.Fit.init(); Keys.Fit.refitAll(); }
+    // The blocks the drag handle was attached to have just been replaced.
+    if (Keys.Arrange) Keys.Arrange.refresh();
     buildThumbs();
+    // A loaded file can carry a different template than the one on screen.
+    syncTemplateSelect();
 
     if (focusPath) {
       var el = $('#editor-scroll [data-path="' +
@@ -419,25 +435,235 @@
   }
 
   /* -------------------------------------------------------------------------
+   * Templates
+   *
+   * The template changes only how the front and announcement sheets are laid
+   * out — same document, same slips, same calendar. Switching is therefore a
+   * plain structural re-render: no content is copied, converted or discarded,
+   * which is what makes it safe to flip back and forth while deciding.
+   * ---------------------------------------------------------------------- */
+
+  /** Fill the toolbar dropdown from State.templates() and select the active
+   *  one. Called on boot and after every structural change, because loading a
+   *  file can bring a different template with it. */
+  function syncTemplateSelect() {
+    var sel = $('#template-select');
+    if (!sel) return;
+    var list = State.templates();
+    var active = State.template();
+
+    // Rebuild only when the option set is actually missing/stale — replacing
+    // the <option>s on every keystroke-driven re-render would close the
+    // dropdown while the user is in it.
+    if (sel.options.length !== list.length) {
+      sel.innerHTML = list.map(function (t) {
+        return '<option value="' + Keys.Render.escAttr(t.id) + '">' +
+          String(t.name).replace(/&/g, '&amp;').replace(/</g, '&lt;') +
+          '</option>';
+      }).join('');
+    }
+    if (sel.value !== active) sel.value = active;
+
+    var current = null;
+    list.forEach(function (t) { if (t.id === active) current = t; });
+    var label = 'Page template: ' + (current ? current.name : active) +
+      (current && current.note ? ' — ' + current.note : '');
+    sel.setAttribute('title', label);
+    sel.setAttribute('aria-label', label);
+  }
+
+  function chooseTemplate(id) {
+    if (id === State.template()) return;
+
+    var applied;
+    structuralChange(function () { applied = State.setTemplate(id); });
+    syncTemplateSelect();
+    State.dirty = true;
+    scheduleAutosave();
+
+    if (applied !== id) {
+      // setTemplate rejected it, so the select is now out of step with the
+      // document; syncTemplateSelect above has already put it back.
+      toast('That template is not available.', 'err');
+      return;
+    }
+    var name = applied;
+    State.templates().forEach(function (t) { if (t.id === applied) name = t.name; });
+    toast(name + ' template applied to the front and announcement pages.', 'ok');
+  }
+
+  /* -------------------------------------------------------------------------
+   * File names
+   *
+   * Both Save and PDF export ask for a name first, suggesting one built from
+   * the issue date on page 1: "May 26, 2026" -> "SP_Keys-May26_2026".
+   * ---------------------------------------------------------------------- */
+
+  /** The page-1 date as a filename fragment. The field is rich text the user
+   *  types freely, so this reads what is actually there rather than assuming
+   *  a format, and degrades in steps instead of failing. */
+  function issueDateSlug() {
+    var raw = String(State.doc.masthead && State.doc.masthead.date || '');
+    /* Parse rather than regex the tags off, so entities (&mdash;, &nbsp;)
+     * become characters instead of surviving as literal "&mdash;". A <template>
+     * rather than a <div>: its contents are inert, so nothing in the field can
+     * fetch a resource just from being read. Same approach as
+     * State.sanitizeHTML. */
+    var tpl = document.createElement('template');
+    tpl.innerHTML = raw;
+    var text = (tpl.content.textContent || '').replace(/\s+/g, ' ').trim();
+
+    /* Preferred shape: a month name, a day and a four-digit year, wherever
+     * they sit in the line. Also matches "Week of May 26, 2026" and a range
+     * like "May 26-30, 2026" (which takes the first day). */
+    var m = text.match(
+      /([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:\s*[-–—]\s*\d{1,2})?(?:st|nd|rd|th)?\s*,?\s*(\d{4})/);
+    if (m) return m[1] + m[2] + '_' + m[3];
+
+    // Anything else: use the line as written, punctuation folded to "_".
+    var slug = text.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+    if (slug) return slug.slice(0, 60);
+
+    // Empty date field: today, so the name is still unique and sortable.
+    var now = new Date();
+    return now.getFullYear() + '-' +
+      ('0' + (now.getMonth() + 1)).slice(-2) + '-' +
+      ('0' + now.getDate()).slice(-2);
+  }
+
+  function suggestedName() { return 'SP_Keys-' + issueDateSlug(); }
+
+  /** Make anything the user typed safe to hand to a download or a print
+   *  dialog. Path separators and the Windows-reserved set would otherwise
+   *  produce a silently renamed — or nested — file. */
+  function cleanFilename(name, fallback) {
+    var s = String(name == null ? '' : name)
+      .replace(/[\u0000-\u001f\u007f]/g, '')   // control characters
+      .replace(/[\/\\:*?"<>|]/g, '-')          // path + Windows-reserved
+      .replace(/\s+/g, ' ')
+      .replace(/^[.\s]+|[.\s]+$/g, '')         // no leading dot: not a hidden file
+      .slice(0, 120)
+      .trim();
+    return s || fallback;
+  }
+
+  /** Ask for a file name.
+   *
+   *  Resolves with the cleaned name, or null if the user cancelled — callers
+   *  must treat null as "do nothing", not as "use the default".
+   *
+   *  opts: { title, note, ext, okLabel, suggestion } */
+  var nameDialogDone = null;
+
+  function askFilename(opts) {
+    var suggestion = cleanFilename(opts.suggestion, 'newsletter');
+    var ext = opts.ext || '';
+
+    return new Promise(function (resolve) {
+      var dlg = $('#name-dialog');
+
+      // No <dialog> support: fall back to the platform prompt. Here the
+      // suggestion has to be the value, since there is no placeholder.
+      if (!dlg || typeof dlg.showModal !== 'function') {
+        var typed = global.prompt(opts.title + ' — file name', suggestion);
+        resolve(typed === null ? null : cleanFilename(typed, suggestion));
+        return;
+      }
+
+      // A second request while one is open would strand the first promise.
+      if (dlg.open) { resolve(null); return; }
+
+      /* The `close` event is queued, not synchronous, so a request made in the
+       * gap after close() would overwrite the pending settler and hand the
+       * previous caller this dialog's answer. Settle the old one first. */
+      if (nameDialogDone) nameDialogDone(null);
+
+      var input = $('#name-dialog-input');
+      $('#name-dialog-title').textContent = opts.title;
+      $('#name-dialog-note').textContent = opts.note || '';
+      $('#name-dialog-ext').textContent = ext;
+      $('#name-dialog-ok').textContent = opts.okLabel || 'Save';
+      input.value = '';                     // empty: the suggestion is the
+      input.placeholder = suggestion;       // placeholder, so Enter accepts it
+
+      /* One resolve, whichever way the dialog closes — submit, Cancel, Esc or
+       * a click on the backdrop. `close` always fires last, so it is the
+       * settle point; the others just record the answer. */
+      nameDialogDone = function (value) {
+        nameDialogDone = null;
+        resolve(value);
+      };
+      dlg.returnValue = '';
+      dlg.showModal();
+      input.focus();
+      input.select();
+    });
+  }
+
+  function wireNameDialog() {
+    var dlg = $('#name-dialog');
+    if (!dlg || typeof dlg.showModal !== 'function') return;
+    var input = $('#name-dialog-input');
+    var form = $('#name-dialog-form');
+
+    form.addEventListener('submit', function (e) {
+      e.preventDefault();
+      // Blank means "accept the suggestion", which is the placeholder.
+      dlg.returnValue = cleanFilename(input.value, input.placeholder);
+      dlg.close();
+    });
+
+    dlg.addEventListener('click', function (e) {
+      if (e.target.getAttribute &&
+          e.target.getAttribute('data-dlg') === 'cancel') {
+        dlg.returnValue = '';
+        dlg.close();
+        return;
+      }
+      // Clicks land on the <dialog> itself only when they hit the backdrop.
+      if (e.target === dlg) { dlg.returnValue = ''; dlg.close(); }
+    });
+
+    // Esc closes without firing submit, leaving returnValue as we set it.
+    dlg.addEventListener('close', function () {
+      var done = nameDialogDone;
+      if (!done) return;
+      done(dlg.returnValue ? dlg.returnValue : null);
+    });
+  }
+
+  /* -------------------------------------------------------------------------
    * Save / load / print
    * ---------------------------------------------------------------------- */
   function saveFile() {
+    askFilename({
+      title: 'Save newsletter',
+      note: 'Saved to your downloads as a .json file, which Load can re-open.',
+      ext: '.json',
+      okLabel: 'Save',
+      suggestion: suggestedName()
+    }).then(function (name) {
+      if (name == null) return;              // cancelled
+      writeSaveFile(name);
+    });
+  }
+
+  function writeSaveFile(name) {
+    // Don't end up with "issue.json.json" if the name already carries it.
+    var base = String(name).replace(/\.json$/i, '') || suggestedName();
     var json = State.toJSON();
     var blob = new Blob([json], { type: 'application/json' });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
-    var d = String(State.doc.masthead && State.doc.masthead.date || '')
-      .replace(/<[^>]*>/g, '').trim().replace(/[^A-Za-z0-9]+/g, '_')
-      .replace(/^_|_$/g, '') || new Date().toISOString().slice(0, 10);
     a.href = url;
-    a.download = 'keys_' + d + '.json';
+    a.download = base + '.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     State.dirty = false;
     State.autosave();
-    toast('Newsletter saved to your downloads.', 'ok');
+    toast('Saved ' + base + '.json to your downloads.', 'ok');
   }
 
   function loadFile(evt) {
@@ -506,6 +732,7 @@
 
   function restoreAfterPrint() {
     document.body.classList.remove('is-printing');
+    restorePrintTitle();
     if (Keys.Flip) {
       Keys.Flip.relayout();
       Keys.Flip.go(Keys.Flip.current(), { animate: false });
@@ -513,8 +740,52 @@
     if (Keys.Fit) Keys.Fit.refitAll();
   }
 
+  /* There is no web API for setting the PDF file name: "Save as PDF" is the
+   * browser's own dialog and it seeds the name from document.title. So the
+   * name the user picked is parked in the title for the duration of the print
+   * and taken back afterwards. The user can still overtype it in that dialog —
+   * this only decides what it suggests. */
+  var savedDocTitle = null;
+
+  function setPrintTitle(name) {
+    if (savedDocTitle === null) savedDocTitle = document.title;
+    document.title = name;
+  }
+
+  function restorePrintTitle() {
+    if (savedDocTitle === null) return;
+    document.title = savedDocTitle;
+    savedDocTitle = null;
+  }
+
   function printDoc() {
+    askFilename({
+      title: 'Export PDF',
+      note: 'Choose "Save as PDF" as the destination in the print dialog. ' +
+            'This is the file name it will suggest.',
+      ext: '.pdf',
+      okLabel: 'Continue',
+      suggestion: suggestedName()
+    }).then(function (name) {
+      if (name == null) return;              // cancelled
+      printWithName(String(name).replace(/\.pdf$/i, '') || suggestedName());
+    });
+  }
+
+  function printWithName(base) {
+    setPrintTitle(base);
     prepareForPrint();
+    /* The title must survive until the print dialog has read it, so it is NOT
+     * put back here: `afterprint` is the restore path. Browsers differ on
+     * whether print() blocks, so restoring on the next line would be a race
+     * the feature loses silently. Regaining window focus is the backstop for
+     * anything that never fires afterprint — by then the dialog is gone. */
+    var backstop = function () {
+      global.removeEventListener('focus', backstop);
+      restorePrintTitle();
+    };
+    global.addEventListener('focus', backstop);
+
     // Let layout settle before handing off to the print engine.
     requestAnimationFrame(function () {
       requestAnimationFrame(function () { global.print(); });
@@ -528,23 +799,97 @@
     var rail = $('#thumb-rail');
     if (!rail) return;
     var current = Keys.Flip ? Keys.Flip.current() : 1;
+    var list = pageList();
     var html = '';
-    for (var n = 1; n <= TOTAL_PAGES; n++) {
-      var landscape = n === 4;
-      html += '<button type="button" class="thumb' + (n === current ? ' is-active' : '') +
-        '" data-page="' + n + '" data-orientation="' + (landscape ? 'landscape' : 'portrait') +
-        '" title="' + PAGE_NAMES[n] + '" aria-label="Page ' + n + ': ' + PAGE_NAMES[n] + '"' +
-        (n === current ? ' aria-current="true"' : '') + '>' +
-        '<span class="thumb-num">' + n + '</span>' +
-        '<span class="thumb-label">' + PAGE_SHORT[n] + '</span>' +
+
+    list.forEach(function (p) {
+      var esc = function (t) {
+        return String(t).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+          .replace(/</g, '&lt;');
+      };
+      html += '<button type="button" class="thumb' +
+        (p.n === current ? ' is-active' : '') +
+        '" data-page="' + p.n + '" data-kind="' + esc(p.kind) + '"' +
+        ' data-orientation="' + esc(p.orientation) + '"' +
+        ' title="' + esc(p.name) + '"' +
+        ' aria-label="Page ' + p.n + ': ' + esc(p.name) + '"' +
+        (p.n === current ? ' aria-current="true"' : '') + '>' +
+        '<span class="thumb-sheet"><span class="thumb-num">' + p.n +
+          '</span></span>' +
+        '<span class="thumb-label">' + esc(p.short) + '</span>' +
         '</button>';
-    }
+    });
+
+    /* The shortcut: add another announcement page straight from the preview,
+     * without opening the editor rail. */
+    var apages = (State.doc.articles && Array.isArray(State.doc.articles.pages))
+      ? State.doc.articles.pages.length : 1;
+    var atMax = apages >= (State.MAX_ANNOUNCEMENT_PAGES || 20);
+    html += '<button type="button" class="thumb thumb--add" data-act="page-add"' +
+      (atMax ? ' disabled' : '') +
+      ' title="Add another announcement page"' +
+      ' aria-label="Add another announcement page">' +
+      '<span class="thumb-sheet"><span class="thumb-plus" aria-hidden="true">+' +
+        '</span></span>' +
+      '<span class="thumb-label">Add page</span>' +
+      '</button>';
+
     rail.innerHTML = html;
+  }
+
+  /* -------------------------------------------------------------------------
+   * Announcement pages
+   * ---------------------------------------------------------------------- */
+  function announcementPages() {
+    if (!State.doc.articles || !Array.isArray(State.doc.articles.pages)) {
+      State.doc.articles = State.doc.articles || {};
+      State.doc.articles.pages = [[]];
+    }
+    return State.doc.articles.pages;
+  }
+
+  function addAnnouncementPage() {
+    var pages = announcementPages();
+    if (pages.length >= (State.MAX_ANNOUNCEMENT_PAGES || 20)) {
+      toast('That is the maximum number of announcement pages.', 'err');
+      return;
+    }
+    var newIndex = pages.length;
+    structuralChange(function () {
+      pages.push([{ title: 'NEW SECTION',
+                    body: '<p>Write the announcement here…</p>' }]);
+    });
+    var p = Keys.Render.pages().filter(function (x) {
+      return x.kind === 'announcements';
+    })[newIndex];
+    if (p && Keys.Flip) Keys.Flip.go(p.n);
+    toast('Added page ' + (p ? p.n : '') + '.', 'ok');
+  }
+
+  function removeAnnouncementPage(index) {
+    var pages = announcementPages();
+    var i = Number(index);
+    if (isNaN(i) || i < 0 || i >= pages.length) return;
+    if (pages.length <= 1) {
+      toast('The issue needs at least one announcement page.', 'err');
+      return;
+    }
+    var count = (pages[i] || []).length;
+    if (count && !global.confirm(
+      'Delete this page and the ' + count +
+      (count === 1 ? ' section' : ' sections') + ' on it?')) return;
+
+    structuralChange(function () { pages.splice(i, 1); });
+    if (Keys.Flip && Keys.Flip.current() > totalPages()) {
+      Keys.Flip.go(totalPages());
+    }
+    toast('Page removed.', 'ok');
   }
 
   function onPageChange(page) {
     var ind = $('#page-indicator');
-    if (ind) ind.textContent = page + ' / ' + TOTAL_PAGES;
+    var total = totalPages();
+    if (ind) ind.textContent = page + ' / ' + total;
     $$('#thumb-rail .thumb').forEach(function (t) {
       var on = Number(t.getAttribute('data-page')) === page;
       t.classList.toggle('is-active', on);
@@ -554,7 +899,7 @@
     var prev = $('[data-act="prev"]');
     var next = $('[data-act="next"]');
     if (prev) prev.disabled = page <= 1;
-    if (next) next.disabled = page >= TOTAL_PAGES;
+    if (next) next.disabled = page >= total;
     syncZoomLabel();
   }
 
@@ -715,6 +1060,7 @@
     document.addEventListener('change', function (e) {
       var el = e.target;
       if (el === $('#load-input')) { loadFile(e); return; }
+      if (el.id === 'template-select') { chooseTemplate(el.value); return; }
       if (!el.classList || !el.classList.contains('pt')) return;
       var path = el.getAttribute('data-path');
       if (!path) return;
@@ -755,6 +1101,7 @@
 
       /* page badge / thumbnail -> navigate */
       var nav = t.closest('[data-page]');
+      if (nav && nav.classList.contains('thumb--add')) nav = null;
       if (nav && (nav.classList.contains('ed-badge') || nav.classList.contains('thumb'))) {
         if (Keys.Flip) Keys.Flip.go(Number(nav.getAttribute('data-page')));
         return;
@@ -769,6 +1116,10 @@
         case 'load': $('#load-input').click(); return;
         case 'pdf': printDoc(); return;
         case 'theme': toggleTheme(); return;
+        case 'page-add': addAnnouncementPage(); return;
+        case 'page-del':
+          removeAnnouncementPage(btn.getAttribute('data-page-index'));
+          return;
         case 'prev': if (Keys.Flip) Keys.Flip.prev(); return;
         case 'next': if (Keys.Flip) Keys.Flip.next(); return;
         case 'zoom-in': if (Keys.Flip) { Keys.Flip.zoomIn(); syncZoomLabel(); } return;
@@ -873,6 +1224,9 @@
       }
     });
 
+    /* --- the Save / PDF file-name dialog --- */
+    wireNameDialog();
+
     /* --- print hooks --- */
     global.addEventListener('beforeprint', prepareForPrint);
     global.addEventListener('afterprint', restoreAfterPrint);
@@ -907,8 +1261,10 @@
 
     buildThumbs();
     markEmpties();
+    syncTemplateSelect();
     onPageChange(Keys.Flip ? Keys.Flip.current() : 1);
     if (Keys.Fit) Keys.Fit.refitAll();
+    if (Keys.Arrange) Keys.Arrange.init();
   }
 
   function boot() {
@@ -967,8 +1323,19 @@
     THEME_KEY: THEME_KEY,
     prepareForPrint: prepareForPrint,
     restoreAfterPrint: restoreAfterPrint,
+    saveFile: saveFile,
+    printDoc: printDoc,
+    writeSaveFile: writeSaveFile,
+    askFilename: askFilename,
+    suggestedName: suggestedName,
+    cleanFilename: cleanFilename,
     buildThumbs: buildThumbs,
-    TOTAL_PAGES: TOTAL_PAGES
+    addAnnouncementPage: addAnnouncementPage,
+    removeAnnouncementPage: removeAnnouncementPage,
+    totalPages: totalPages,
+    pageList: pageList,
+    chooseTemplate: chooseTemplate,
+    syncTemplateSelect: syncTemplateSelect
   };
 
   Keys.App = App;

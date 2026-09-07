@@ -125,19 +125,83 @@
   /* -------------------------------------------------------------------------
    * Sections
    * ---------------------------------------------------------------------- */
-  function page1Section(d) {
+  /** A checkbox bound to a boolean path. */
+  function check(label, path, page, hint) {
+    var on = !!State.get(path);
+    return '<div class="ed-field">' +
+      '<label class="ed-check">' +
+        '<input type="checkbox" class="pt" data-path="' + escAttr(path) + '"' +
+          ' data-page="' + Number(page) + '"' + (on ? ' checked' : '') + '>' +
+        '<span>' + escText(label) + '</span>' +
+      '</label>' +
+      (hint ? '<p class="ed-hint">' + escText(hint) + '</p>' : '') +
+    '</div>';
+  }
+
+  /* -------------------------------------------------------------------------
+   * Front page.
+   *
+   * The two templates print different things, so the rail offers different
+   * fields. The rule is: SHOW ONLY WHAT THE ACTIVE TEMPLATE RENDERS. Anything
+   * the other template owns stays in the document untouched and reappears the
+   * moment you switch back — the lead hint says so, because a field silently
+   * vanishing from the rail is otherwise indistinguishable from losing it.
+   *
+   * Shared by both:  tagline, title, date, schoolInfo, sectionHeading,
+   *                  classroom.body/signature, thisWeek, lookingAhead,
+   *                  articles.page1.
+   * Contemporary:    masthead.motto, classroom.verse.
+   * Modern:          masthead.volume, masthead.contactHeading, intro.*,
+   *                  bible.*, footer.site, modern.emblem.
+   * ---------------------------------------------------------------------- */
+  function page1Section(d, ordinal) {
+    var modern = State.template() === 'modern';
+    var other = modern ? 'Contemporary' : 'Modern';
+
     var body =
+      '<p class="ed-hint ed-hint--lead">Fields for the <strong>' +
+      (modern ? 'Modern' : 'Contemporary') + '</strong> template. The ' +
+      other + ' template uses a few different ones &mdash; switch templates ' +
+      'in the toolbar to edit those; nothing is lost either way.</p>' +
+
       subhead('Masthead') +
       rt('Tagline', 'masthead.tagline', 1, { single: true }) +
-      rt('Newsletter title', 'masthead.title', 1, { single: true }) +
-      rt('Motto', 'masthead.motto', 1, { single: true }) +
+      rt('Newsletter title', 'masthead.title', 1,
+         { single: true,
+           hint: modern
+             ? 'Printed as typed.'
+             : 'Printed in capitals whatever you type.' }) +
+      (modern
+        ? rt('Volume and issue', 'masthead.volume', 1,
+             { single: true, placeholder: 'Volume 1, Issue 1  2026',
+               hint: 'Small line beside the title.' })
+        : rt('Motto', 'masthead.motto', 1, { single: true })) +
       rt('Issue date', 'masthead.date', 1, { single: true, placeholder: 'May 26, 2026' }) +
+      (modern ? rt('Contact heading', 'masthead.contactHeading', 1,
+                   { single: true, placeholder: 'CONTACT US!' }) : '') +
       rt('School contact block', 'masthead.schoolInfo', 1,
-         { minHeight: 110, hint: 'Appears at the top right of page 1.' }) +
+         { minHeight: 110,
+           hint: modern
+             ? 'Bottom of the right-hand column.'
+             : 'Appears at the top right of page 1.' }) +
+
+      (modern
+        ? subhead('Introducing the Keys') +
+          rt('Block heading', 'intro.heading', 1,
+             { minHeight: 48,
+               hint: 'Two lines in the reference. Press Shift+Enter for a line break.' }) +
+          rt('Block text', 'intro.body', 1, { minHeight: 150 }) +
+          check('Show the cross-and-book emblem', 'modern.emblem', 1,
+                'Line art under the intro block. Turn it off to buy space on a busy issue.') +
+
+          subhead('Bible Inspo') +
+          rt('Block heading', 'bible.heading', 1, { single: true, placeholder: 'Bible Inspo:' }) +
+          rt('Verses', 'bible.body', 1, { minHeight: 150 })
+        : '') +
 
       subhead('Classroom Corner') +
       rt('Section heading', 'masthead.sectionHeading', 1, { single: true }) +
-      rt('Verse or quote', 'classroom.verse', 1, { minHeight: 70 }) +
+      (modern ? '' : rt('Verse or quote', 'classroom.verse', 1, { minHeight: 70 })) +
       rt('Article', 'classroom.body', 1,
          { minHeight: 240, hint: 'The main story. Long text is shrunk to fit the column.' }) +
       rt('Sign-off', 'classroom.signature', 1, { minHeight: 48 }) +
@@ -152,38 +216,107 @@
       rt('Footer note', 'lookingAhead.note', 1, { single: true }) +
 
       subhead('Page 1 announcements') +
-      articleList('articles.page1', d.articles && d.articles.page1, 1);
+      articleList('articles.page1', d.articles && d.articles.page1, 1) +
+
+      (modern
+        ? subhead('Running foot') +
+          rt('Website line', 'footer.site', 1,
+             { single: true, placeholder: 'discoverstpeters.org',
+               hint: 'Printed at the foot of the front page. Page numbers are ' +
+                     'added automatically.' })
+        : '');
 
     /* Closed by default, like every other section: a fresh load (and a reload)
      * shows a compact index of the four pages rather than a wall of fields.
      * Editor.all() carries the user's open/closed state across structural
      * re-renders, so this default only ever applies to the FIRST render. */
-    return section('page1', 1, 'Front Page', body, false);
+    return section('page1', ordinal || 1, 'Front Page', body, false);
   }
 
-  function page2Section(d) {
+  /** The Announcements section: one group per announcement page, plus the
+   *  controls to add and remove pages. */
+  function page2Section(d, pageList) {
+    var apages = (d.articles && Array.isArray(d.articles.pages))
+      ? d.articles.pages : [[]];
+    var ordinals = pageList.filter(function (p) {
+      return p.kind === 'announcements';
+    });
+    var firstOrdinal = ordinals.length ? ordinals[0].n : 2;
+
     var body =
-      '<p class="ed-hint ed-hint--lead">Full-width announcement sections. These ' +
-      'fill page 2 in order.</p>' +
-      articleList('articles.page2', d.articles && d.articles.page2, 2);
-    return section('page2', 2, 'Announcements', body, false);
+      '<p class="ed-hint ed-hint--lead">Full-width announcement sections. ' +
+      'Add as many pages as the issue needs &mdash; the pages after them ' +
+      'renumber themselves.</p>';
+
+    apages.forEach(function (list, i) {
+      var ord = ordinals[i] ? ordinals[i].n : firstOrdinal + i;
+      body +=
+        '<div class="ed-subpage" data-page-index="' + i + '">' +
+          '<div class="ed-subpage-head">' +
+            '<span class="ed-subpage-badge">' + ord + '</span>' +
+            '<span class="ed-subpage-title">' +
+              escText(ordinals[i] ? ordinals[i].name : 'Announcements') +
+            '</span>' +
+            (apages.length > 1
+              ? '<button type="button" class="ed-btn ed-btn--icon ed-btn--danger"' +
+                ' data-act="page-del" data-page-index="' + i + '"' +
+                ' title="Remove this page" aria-label="Remove announcement page ' +
+                ord + '">&#10005;</button>'
+              : '') +
+          '</div>' +
+          articleList('articles.pages.' + i, list, ord) +
+        '</div>';
+    });
+
+    var atMax = apages.length >=
+      (Keys.State.MAX_ANNOUNCEMENT_PAGES || 20);
+    body += '<button type="button" class="ed-add ed-add--page"' +
+      ' data-act="page-add"' + (atMax ? ' disabled' : '') + '>' +
+      '+ Add announcement page</button>';
+
+    return section('page2', firstOrdinal, 'Announcements', body, false);
   }
 
-  function page3Section(d) {
+  function page3Section(d, ordinal) {
     var body = Keys.Slips
       ? Keys.Slips.editorHTML(d.slips || [])
       : '<p class="ed-hint">Slips module unavailable.</p>';
     // Plain text, not an HTML entity: section() runs the title through
     // escText(), so an "&amp;" here would be escaped a second time and show up
     // on screen as the literal characters "&amp;".
-    return section('page3', 3, 'Lunch Slips and Forms', body, false);
+    return section('page3', ordinal || 3, 'Lunch Slips and Forms', body, false);
   }
 
-  function page4Section(d) {
+  function page4Section(d, ordinal) {
     var body = Keys.Calendar
       ? Keys.Calendar.editorHTML(d.calendar || {})
       : '<p class="ed-hint">Calendar module unavailable.</p>';
-    return section('page4', 4, 'Monthly Calendar', body, false);
+    return section('page4', ordinal || 4, 'Monthly Calendar', body, false);
+  }
+
+  /**
+   * Force every field's `data-page` to its section's ordinal.
+   *
+   * `data-page` is what makes focusing a field turn the preview to the right
+   * sheet. Adding an announcement page renumbers everything after it, and
+   * slips.js / calendar.js hard-code "3" and "4" in the markup they hand back.
+   * Rather than thread ordinals through those modules, the numbers are
+   * corrected here in one pass — the section already knows which page it is.
+   */
+  function syncFieldPages(host) {
+    var sections = host.querySelectorAll('.ed-section');
+    for (var i = 0; i < sections.length; i++) {
+      var badge = sections[i].querySelector('.ed-badge');
+      if (!badge) continue;
+      var n = badge.getAttribute('data-page');
+      if (!n) continue;
+      var fields = sections[i].querySelectorAll('[data-page]');
+      for (var j = 0; j < fields.length; j++) {
+        /* Sub-page badges carry their own correct ordinal already. */
+        if (fields[j].classList.contains('ed-badge')) continue;
+        fields[j].setAttribute('data-page', n);
+      }
+    }
   }
 
   /* -------------------------------------------------------------------------
@@ -204,8 +337,20 @@
       var scrollTop = host.scrollTop;
 
       var d = State.doc;
+      var pageList = Keys.Render && Keys.Render.pages ? Keys.Render.pages() : [];
+      var ord = function (kind) {
+        for (var i = 0; i < pageList.length; i++) {
+          if (pageList[i].kind === kind) return pageList[i].n;
+        }
+        return 0;
+      };
       host.innerHTML =
-        page1Section(d) + page2Section(d) + page3Section(d) + page4Section(d);
+        page1Section(d, ord('front')) +
+        page2Section(d, pageList) +
+        page3Section(d, ord('slips')) +
+        page4Section(d, ord('calendar'));
+
+      syncFieldPages(host);
 
       // Restore prior open/closed state (first render uses the defaults above).
       if (prev.length) {

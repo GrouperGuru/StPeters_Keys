@@ -19,7 +19,51 @@
   var Keys = global.Keys = global.Keys || {};
 
   var STORAGE_KEY = 'stpeters.keys.autosave.v2';
-  var SCHEMA_VERSION = 2;
+  var SCHEMA_VERSION = 4;
+
+  /* The newsletter is Front + N announcement pages + Slips + Calendar, so the
+   * page count is data, not a constant. Capped so a hand-edited file cannot
+   * ask for thousands of sheets. */
+  var MAX_ANNOUNCEMENT_PAGES = 20;
+
+  /* ---------------------------------------------------------------------------
+   * Templates
+   *
+   * A template changes only how the FRONT and ANNOUNCEMENT sheets are laid
+   * out. Slips and Calendar are shared, and so is the content: switching is a
+   * presentation choice over one document, never a different document. That is
+   * why `template` lives here rather than in localStorage — it changes the
+   * printed artefact, so it has to travel with the save file.
+   *
+   * Each template renders a subset of the fields. Fields the active template
+   * has no slot for are kept in the document and simply not rendered or shown
+   * in the editor; switching back reveals them untouched. `id` is what the
+   * markup and CSS key off, so these strings are load-bearing.
+   * ------------------------------------------------------------------------ */
+  var TEMPLATES = [
+    {
+      id: 'contemporary',
+      name: 'Contemporary',
+      /* Serif, single wide column plus a ruled right-hand rail.
+       * Reference: reference/keys_may_25.pdf */
+      note: 'Serif, ruled boxes, one wide column'
+    },
+    {
+      id: 'modern',
+      name: 'Modern',
+      /* Geometric sans, three columns on the front, two on announcements.
+       * Reference: reference/Keys_Modern-Page1.png, -Page2.png */
+      note: 'Sans-serif, three columns, ruled headings'
+    }
+  ];
+  var DEFAULT_TEMPLATE = 'contemporary';
+
+  function isTemplate(id) {
+    for (var i = 0; i < TEMPLATES.length; i++) {
+      if (TEMPLATES[i].id === id) return true;
+    }
+    return false;
+  }
 
   /* ---------------------------------------------------------------------------
    * Default document — seeded with the May 26, 2026 issue so the app opens on
@@ -30,12 +74,24 @@
     return {
       meta: { version: SCHEMA_VERSION, savedAt: null },
 
+      /* Which front/announcement layout to print. See TEMPLATES above. */
+      template: DEFAULT_TEMPLATE,
+
       masthead: {
         tagline: "QUALITY CHRISTIAN EDUCATION WITH THE MASTER'S TOUCH",
-        title: "ST. PETER'S KEYS",
+        /* Stored in title case even though Contemporary prints it in caps:
+         * `text-transform` belongs to the template, not to the content, and
+         * Modern prints this one title-cased. Storing "ST. PETER'S KEYS" would
+         * make it impossible for any template to get back to mixed case. */
+        title: "St. Peter's Keys",
         motto: 'PRAY AND BELIEVE!',
         date: 'May 26, 2026',
-        sectionHeading: 'CLASSROOM CORNER',
+        sectionHeading: 'Classroom Corner',
+        /* Modern only: the small line beside the masthead title. */
+        volume: 'Volume 1, Issue 1&nbsp; 2026',
+        /* Modern only: heading above the contact block in the right column.
+         * Contemporary prints the block with no heading at all. */
+        contactHeading: 'CONTACT US!',
         schoolInfo:
           "St. Peter's Lutheran School<br>" +
           '6168 Walmore  Road<br>' +
@@ -45,6 +101,41 @@
           'Website:  discoverstpeters.org<br>' +
           'Financial Mgr.&mdash;Mrs. Jane Donato'
       },
+
+      /* ----- Modern-template blocks -------------------------------------
+       * The Modern front page has a third column down the left that
+       * Contemporary has no room for. These are seeded from
+       * reference/Keys_Modern-Page1.png so switching templates lands on a
+       * finished-looking page instead of three empty boxes — and so the
+       * Modern layout has real content to be overflow-tested against.
+       * Contemporary keeps them in the file and simply never renders them.
+       * ------------------------------------------------------------------ */
+      intro: {
+        heading: 'Introducing the<br>NEW KEYS!',
+        body:
+          '<p>You are reading the St. Peter&rsquo;s Keys Newsletter. A hard copy ' +
+          'of this newsletter is sent home with your child each Monday or if we ' +
+          'are not in school on Monday, the first day of the week. This ' +
+          'newsletter can also be found on our website at discoverstpeters.org. ' +
+          '&nbsp;Please be sure to read this newsletter as you will find ' +
+          'important information about current and upcoming events.</p>'
+      },
+
+      bible: {
+        heading: 'Bible Inspo:',
+        body:
+          '<p>Carry each other&rsquo;s burdens, and in this way you will fulfill ' +
+          'the law of Christ.<br>Galatians 6:2</p>' +
+          '<p>Do not forget to do good and to share with others, for with such ' +
+          'sacrifices God is pleased.<br>Hebrews 13:16</p>'
+      },
+
+      /* Modern only: the running foot. The page number beside it is derived
+       * from the sheet's ordinal, not stored. */
+      footer: { site: 'discoverstpeters.org' },
+
+      /* Modern-only presentation switches (not content). */
+      modern: { emblem: true },
 
       classroom: {
         verse:
@@ -95,6 +186,11 @@
         ]
       },
 
+      /* Order of the boxes down the page-1 right-hand rail. The boxes
+       * themselves are named objects, so their on-page order needs its own
+       * list for drag-to-reorder to have something to write to. */
+      railOrder: ['thisWeek', 'lookingAhead'],
+
       lookingAhead: {
         heading: 'LOOKING AHEAD',
         rows: [
@@ -109,8 +205,12 @@
         note: 'SEE ATTACHED CALENDAR'
       },
 
-      /* Full-width announcement sections. `page1` renders below the two-column
-       * region on page 1; `page2` fills page 2. */
+      /* Full-width announcement sections.
+       *
+       * `page1` renders below the two-column region on the front page.
+       * `pages` is a LIST OF PAGES — one array of sections per announcement
+       * sheet — so the user can add as many as an issue needs. There is
+       * always at least one. */
       articles: {
         page1: [
           {
@@ -142,7 +242,7 @@
               'Mrs. Scibetta.</p>'
           }
         ],
-        page2: [
+        pages: [[
           {
             title: 'FIELD DAY',
             body:
@@ -196,7 +296,7 @@
               'food tent.</p>' +
               '<p>We look forward to a fun filled day!</p>'
           }
-        ]
+        ]]
       },
 
       /* Page 3 — order-sensitive list of boxes. See slips.js for per-type shape. */
@@ -403,11 +503,21 @@
         ];
       }
       if (raw['input-safety'] != null) {
-        doc.articles.page2 = [
-          { title: 'REMINDERS', body: raw['input-safety'] }
+        doc.articles.pages = [
+          [{ title: 'REMINDERS', body: raw['input-safety'] }]
         ];
       }
       return doc;
+    }
+
+    /* v2 -> v3: a single fixed `articles.page2` became `articles.pages`, a
+     * list of announcement pages. Done here, BEFORE reconcile, so the merge
+     * never has to reason about both shapes at once. */
+    if (raw && raw.articles && typeof raw.articles === 'object' &&
+        raw.articles.pages === undefined && raw.articles.page2 !== undefined) {
+      var page2 = Array.isArray(raw.articles.page2) ? raw.articles.page2 : [];
+      raw.articles.pages = [page2];
+      delete raw.articles.page2;
     }
     return raw;
   }
@@ -426,7 +536,7 @@
    *  up the first `.forEach` in the renderer. */
   var LIST_PATHS = [
     'thisWeek.rows', 'lookingAhead.rows',
-    'articles.page1', 'articles.page2', 'slips'
+    'articles.page1', 'slips'
   ];
 
   /** Coerce anything into a sane array. Accepts a real array, or an
@@ -558,6 +668,23 @@
    *  Anything unfixable is replaced with the default rather than left to throw
    *  somewhere deep in a render pass. */
   function normalizeDoc(doc) {
+    /* 0. The template id reaches CSS selectors and a renderer dispatch table,
+     *    so it must be one of the known ids. A hand-edited or hostile file
+     *    could otherwise name a template that has no renderer, leaving the
+     *    front and announcement sheets blank. sanitizeHTML runs first and
+     *    would already have emptied anything markup-shaped. */
+    if (!isTemplate(doc.template)) doc.template = DEFAULT_TEMPLATE;
+
+    /* Modern's switches are booleans; a string "false" from hand-edited JSON
+     * would read as truthy and turn the emblem back on. */
+    if (!doc.modern || typeof doc.modern !== 'object' ||
+        Array.isArray(doc.modern)) {
+      doc.modern = { emblem: true };
+    }
+    doc.modern.emblem = doc.modern.emblem !== false &&
+      doc.modern.emblem !== 'false' && doc.modern.emblem !== 0 &&
+      doc.modern.emblem !== '';
+
     // 1. Lists must be arrays of objects.
     LIST_PATHS.forEach(function (p) {
       var arr = toArray(get(p, doc)).filter(function (item) {
@@ -582,6 +709,39 @@
         if (slip[k] != null && !Array.isArray(slip[k])) slip[k] = toArray(slip[k]);
       });
     });
+
+    // 1b. `articles.pages` is a list OF LISTS. Repair both levels, and always
+    //     leave at least one announcement page so the page never vanishes.
+    if (!doc.articles || typeof doc.articles !== 'object' ||
+        Array.isArray(doc.articles)) {
+      doc.articles = { page1: [], pages: [[]] };
+    }
+    var pages = toArray(doc.articles.pages)
+      .map(function (page) {
+        return toArray(page).filter(function (item) {
+          return item && typeof item === 'object' && !Array.isArray(item);
+        });
+      })
+      .slice(0, MAX_ANNOUNCEMENT_PAGES);
+    if (!pages.length) pages = [[]];
+    doc.articles.pages = pages;
+    /* An old key surviving a partial merge would silently strand content. */
+    if ('page2' in doc.articles) delete doc.articles.page2;
+
+    // 2b. railOrder must name each rail box exactly once. A file that repeats
+    //     or omits one would otherwise drop a box off page 1 entirely.
+    var RAIL_KEYS = ['thisWeek', 'lookingAhead'];
+    var order = toArray(doc.railOrder).filter(function (k) {
+      return RAIL_KEYS.indexOf(k) !== -1;
+    });
+    var deduped = [];
+    order.forEach(function (k) {
+      if (deduped.indexOf(k) === -1) deduped.push(k);
+    });
+    RAIL_KEYS.forEach(function (k) {
+      if (deduped.indexOf(k) === -1) deduped.push(k);
+    });
+    doc.railOrder = deduped;
 
     // 3. Calendar month/year must be in range, and must be written BACK to
     //    state — not just normalised for display. Otherwise the sheet renders
@@ -732,8 +892,30 @@
     normalizeDoc: normalizeDoc,
     toArray: toArray,
 
+    /* --- templates --- */
+
+    /** The known templates, in the order the toolbar should offer them. */
+    templates: function () { return TEMPLATES.slice(); },
+
+    /** The active template id — always one of TEMPLATES. */
+    template: function () {
+      return isTemplate(State.doc.template) ? State.doc.template
+                                            : DEFAULT_TEMPLATE;
+    },
+
+    /** Switch template. Returns the id actually in effect, so a caller that
+     *  was handed a bad id does not go on to render against it. */
+    setTemplate: function (id) {
+      if (isTemplate(id)) State.doc.template = id;
+      return State.template();
+    },
+
+    isTemplate: isTemplate,
+
     STORAGE_KEY: STORAGE_KEY,
-    SCHEMA_VERSION: SCHEMA_VERSION
+    SCHEMA_VERSION: SCHEMA_VERSION,
+    MAX_ANNOUNCEMENT_PAGES: MAX_ANNOUNCEMENT_PAGES,
+    DEFAULT_TEMPLATE: DEFAULT_TEMPLATE
   };
 
   Keys.State = State;

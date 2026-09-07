@@ -122,6 +122,20 @@
       </button>
     </div>
 
+    <div class="tb-sep"></div>
+
+    <!-- Page-layout template. Sits between the formatting controls and the
+         view controls because it changes the printed artefact, like Save and
+         PDF, rather than how the app is displayed. Options are filled in by
+         app.js from Keys.State.templates() so the list has exactly one
+         source. -->
+    <div class="tb-group" id="template-group">
+      <label class="sr-only" for="template-select">Page template</label>
+      <select class="tb-select tb-select--template" id="template-select"
+              title="Page layout for the front and announcement pages">
+      </select>
+    </div>
+
     <div class="tb-spacer"></div>
 
     <div class="tb-group">
@@ -188,6 +202,33 @@
   </main>
 </div>
 
+<!-- Ask for a file name before Save and before PDF export. A real <dialog>
+     rather than a hand-rolled overlay: modality, focus trapping, Esc-to-close
+     and the top layer all come for free, and it works over file://.
+     app.js falls back to window.prompt() if showModal() is missing.
+
+     The suggested name is the input's PLACEHOLDER, not its value, so the field
+     opens empty: typing replaces it without having to clear it first, and
+     submitting empty accepts the suggestion. -->
+<dialog id="name-dialog" class="dlg" aria-labelledby="name-dialog-title">
+  <form id="name-dialog-form" class="dlg-form">
+    <h2 class="dlg-title" id="name-dialog-title">Save newsletter</h2>
+    <p class="dlg-note" id="name-dialog-note"></p>
+    <label class="dlg-label" for="name-dialog-input">File name</label>
+    <div class="dlg-inputwrap">
+      <input type="text" id="name-dialog-input" class="dlg-input"
+             autocomplete="off" spellcheck="false"
+             aria-describedby="name-dialog-note">
+      <span class="dlg-ext" id="name-dialog-ext" aria-hidden="true">.json</span>
+    </div>
+    <div class="dlg-actions">
+      <button type="button" class="tb-btn" data-dlg="cancel">Cancel</button>
+      <button type="submit" class="tb-btn tb-btn--primary"
+              id="name-dialog-ok">Save</button>
+    </div>
+  </form>
+</dialog>
+
 <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 
 <noscript>
@@ -204,6 +245,7 @@
 <script src="assets/js/calendar.js"></script>
 <script src="assets/js/slips.js"></script>
 <script src="assets/js/render.js"></script>
+<script src="assets/js/arrange.js"></script>
 <script src="assets/js/editor.js"></script>
 <script src="assets/js/app.js"></script>
 </body>

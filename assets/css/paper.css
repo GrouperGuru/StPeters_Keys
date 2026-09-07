@@ -44,10 +44,23 @@
  * TABLE OF CONTENTS
  *   01  Shell — #page-stage, .paper, .paper-shade, .paper-flow, .fit
  *   02  Paper typography base + rich-text primitives
- *   03  Pages 1 & 2 — .nl-*
+ *   03  Front + announcements, CONTEMPORARY template — .nl-*
+ *   03b Front + announcements, MODERN template — .nl-m-* and .nl-* overrides
  *   04  Page 3 — .slip-*
  *   05  Page 4 — .cal-*
  *   06  Screen-only affordances (neutralised by print.css)
+ * ---------------------------------------------------------------------------
+ *
+ * TEMPLATES. Every sheet carries `data-template` (render.js). Section 03 is
+ * written WITHOUT a template qualifier and is therefore the Contemporary
+ * baseline; section 03b re-points what Modern changes. Two rules follow:
+ *
+ *   - anything in 03 that Modern must not inherit has to be overridden in
+ *     03b, not made conditional in 03 — that keeps Contemporary's cascade
+ *     exactly as it was before templates existed;
+ *   - the slips and calendar sheets are shared, so NOTHING in 03b may match
+ *     them. Every selector there is qualified by both `data-template="modern"`
+ *     and a `data-kind` of front or announcements.
  * ========================================================================== */
 
 
@@ -154,7 +167,7 @@
 /* Page 4 runs closer to the trim than pages 1–3 (docs/CLASSES.md). Measured
  * off docs/pg-4.png: grid rules land 0.47in from each side edge and 0.35in
  * above the bottom trim. */
-.paper[data-page="4"] .paper-flow {
+.paper[data-kind="calendar"] .paper-flow {
   padding: 0.2in 0.47in 0.35in;
 }
 
@@ -255,7 +268,7 @@
 
 
 /* =============================================================================
- * 03 — PAGES 1 & 2  ·  .nl-*
+ * 03 — FRONT + ANNOUNCEMENTS, CONTEMPORARY  ·  .nl-*
  * -----------------------------------------------------------------------------
  * Markup: render.js  (SPEC §3b). Reference: docs/pg-1.png, docs/pg-2.png.
  * All sizes are `em` of `.paper-flow`'s 10.5pt base so tier-2 scaling works.
@@ -476,7 +489,7 @@
 }
 
 /* Page 2 is nothing but articles, so it starts near the top margin. */
-.paper[data-page="2"] .nl-articles { margin-top: 0.2in; }
+.paper[data-kind="announcements"] .nl-articles { margin-top: 0.2in; }
 
 .nl-article {
   break-inside: avoid;
@@ -525,6 +538,390 @@
 .nl-article-body li { margin-bottom: 0.3em; }
 
 .nl-article-body .indent { margin: 0.25em 0 0.25em 1.6em; }
+
+
+/* =============================================================================
+ * 03b — FRONT + ANNOUNCEMENTS, MODERN  ·  .nl-m-*
+ * -----------------------------------------------------------------------------
+ * Markup: render.js frontModern() / modernFoot() (SPEC §3c).
+ * Reference: reference/Keys_Modern-Page1.png, reference/Keys_Modern-Page2.png.
+ *
+ * Every selector is qualified by BOTH `data-template="modern"` and a
+ * `data-kind` of front or announcements, so the shared slips and calendar
+ * sheets can never be reached from here.
+ *
+ * Measured off the references at 132 px/in:
+ *   3 front columns  2.02in : 2.89in : 2.33in  (28 : 41 : 33)
+ *   masthead title   cap 0.50in  ·  date band cap 0.42in, light weight
+ *   tagline          cap 0.15in bold  ·  section headings cap 0.15in bold
+ *   announcements    two equal columns, 0.33in gutter
+ *
+ * The references print with ~0.2in side margins. This uses 0.4in: it keeps
+ * the rules reading as near-edge-to-edge while staying inside the
+ * unprintable border of ordinary desktop printers, which 0.2in is not.
+ * ========================================================================== */
+
+/* --- shared scope helpers -------------------------------------------------
+ * Repeated on every rule below rather than factored into a shorter selector,
+ * because `:is()`/`:where()` would flatten specificity and let section 03's
+ * plain `.nl-*` rules win the cascade in ways that are painful to debug.
+ * ---------------------------------------------------------------------- */
+
+/* The flow becomes a column so the running foot can sit at the bottom with
+ * `margin-top:auto`. Children are `flex:0 0 auto` on purpose: a shrinkable
+ * item would absorb an overflow instead of letting it show, and tier 2 only
+ * shrinks the page when it can SEE the overflow. */
+.paper[data-template="modern"][data-kind="front"] .paper-flow,
+.paper[data-template="modern"][data-kind="announcements"] .paper-flow {
+  display: flex;
+  flex-direction: column;
+  padding: 0.36in 0.4in 0.26in;
+  font-family: var(--pf-mod-body);
+  line-height: 1.28;
+}
+
+.paper[data-template="modern"][data-kind="front"] .paper-flow > *,
+.paper[data-template="modern"][data-kind="announcements"] .paper-flow > * {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+/* Modern face stacks. Geometric for display, humanist for copy. Every entry
+ * is a system face — the app makes no network requests, so there are no
+ * webfonts to fall back from. */
+.paper[data-template="modern"] {
+  --pf-mod-display: 'Century Gothic', 'Avenir Next', Avenir, Futura,
+                    'Trebuchet MS', 'Segoe UI', 'DejaVu Sans', Arial, sans-serif;
+  --pf-mod-body:    'Segoe UI', 'Helvetica Neue', Helvetica, Arial,
+                    'Liberation Sans', 'DejaVu Sans', sans-serif;
+}
+
+/* --- masthead band -------------------------------------------------------- */
+/* Title and volume share a baseline; the volume line is pushed to the right
+ * edge and never wraps the title off its own line. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-head {
+  border-bottom: 3px solid #000;
+  padding-bottom: 0.04in;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-titlerow {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.12in;
+  min-width: 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-title {
+  font-family: var(--pf-mod-display);
+  font-weight: 700;
+  font-size: 4.6em;              /* ≈48pt — cap height 0.50in, measured */
+  line-height: 1.02;
+  letter-spacing: -0.015em;
+  text-align: center;
+  text-transform: none;          /* Modern prints the title in mixed case */
+  margin: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* Sized as a share of the row rather than `white-space: nowrap`. Nowrap kept
+ * the reference's short "Volume 1, Issue 1  2026" on one line, but it also
+ * made this the one region on the sheet that could not be made to fit by any
+ * amount of shrinking: a long value became a single unbreakable line and
+ * pushed the masthead — and with it the whole page — off the paper sideways.
+ * A short value still sits on one line; a long one wraps. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-volume {
+  font-size: 0.86em;             /* ≈9pt */
+  line-height: 1.2;
+  text-align: right;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 34%;
+  align-self: flex-end;
+  padding-bottom: 0.03in;
+  overflow-wrap: anywhere;
+}
+
+/* The reference's double rule: the 3px above is .nl-m-head's border, this is
+ * the 1.5px hairline under it. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-dateband {
+  border-top: 1.5px solid #000;
+  border-bottom: 1.5px solid #000;
+  margin-top: 0.045in;
+  padding: 0.045in 0 0.055in;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-date {
+  font-family: var(--pf-mod-display);
+  font-weight: 400;              /* the reference date is light, not bold */
+  font-size: 4.05em;             /* ≈42pt — cap height 0.42in, measured */
+  line-height: 1.0;
+  letter-spacing: 0.005em;
+  text-align: center;
+  text-transform: uppercase;
+  margin: 0;
+  overflow-wrap: break-word;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-tagline {
+  font-family: var(--pf-mod-display);
+  font-weight: 700;
+  font-style: normal;            /* Contemporary italicises this; Modern does not */
+  font-size: 1.42em;             /* ≈15pt */
+  line-height: 1.25;
+  letter-spacing: 0.005em;
+  text-align: center;
+  text-transform: uppercase;
+  border-bottom: 1.5px solid #000;
+  margin: 0;
+  padding: 0.075in 0 0.075in;
+}
+
+/* --- three-column body ---------------------------------------------------- */
+.paper[data-template="modern"][data-kind="front"] .nl-m-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 28fr) minmax(0, 41fr) minmax(0, 33fr);
+  column-gap: 0.17in;
+  align-items: start;
+  margin-top: 0.2in;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-aside,
+.paper[data-template="modern"][data-kind="front"] .nl-m-main,
+.paper[data-template="modern"][data-kind="front"] .nl-rail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-aside { gap: 0.16in; }
+.paper[data-template="modern"][data-kind="front"] .nl-rail    { gap: 0.3in; }
+
+/* --- ruled section headings ----------------------------------------------
+ * The signature Modern device: a bold centred heading sitting on a rule that
+ * runs the full width of its column. Used by every block heading, by the
+ * Classroom Corner heading and by announcement headings, so they all line up
+ * optically across the sheet.
+ * ---------------------------------------------------------------------- */
+.paper[data-template="modern"][data-kind="front"] .nl-m-blocktitle,
+.paper[data-template="modern"][data-kind="front"] .nl-heading,
+.paper[data-template="modern"][data-kind="front"] .nl-article-title,
+.paper[data-template="modern"][data-kind="announcements"] .nl-article-title {
+  font-family: var(--pf-mod-display);
+  font-weight: 700;
+  font-style: normal;
+  font-size: 1.42em;             /* ≈15pt — cap height 0.15in, measured */
+  line-height: 1.2;
+  letter-spacing: 0.005em;
+  text-align: center;
+  text-transform: uppercase;
+  border-bottom: 2px solid #000;
+  margin: 0 0 0.5em;
+  padding-bottom: 0.035in;
+  overflow-wrap: break-word;
+}
+
+/* The two left-column headings are mixed case and a touch larger, matching
+ * "Introducing the NEW KEYS!" and "Bible Inspo:" in the reference. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-blocktitle--intro,
+.paper[data-template="modern"][data-kind="front"] .nl-m-blocktitle--bare,
+.paper[data-template="modern"][data-kind="front"] .nl-heading {
+  font-weight: 400;
+  font-size: 1.95em;             /* ≈20pt */
+  line-height: 1.12;
+  text-transform: none;
+}
+
+/* "Bible Inspo:" carries no rule in the reference. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-blocktitle--bare {
+  border-bottom: 0;
+  padding-bottom: 0;
+  margin-bottom: 0.2em;
+}
+
+/* --- block copy ----------------------------------------------------------- */
+.paper[data-template="modern"][data-kind="front"] .nl-m-blockbody,
+.paper[data-template="modern"][data-kind="front"] .nl-body {
+  font-size: 1em;
+  line-height: 1.3;
+  text-align: justify;
+  text-justify: inter-word;
+  hyphens: auto;
+  -webkit-hyphens: auto;
+  overflow-wrap: break-word;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-blockbody p,
+.paper[data-template="modern"][data-kind="front"] .nl-body p {
+  margin: 0 0 1em;
+  text-indent: 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-blockbody p:last-child,
+.paper[data-template="modern"][data-kind="front"] .nl-body p:last-child {
+  margin-bottom: 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-sign {
+  margin-top: 0.14in;
+  line-height: 1.3;
+}
+
+/* --- emblem ---------------------------------------------------------------
+ * Decoration, so it is allowed to be the one thing that gives up space when
+ * the page is tight: a percentage width shrinks with the column, and the
+ * aspect ratio is fixed by the SVG's own viewBox.
+ * ---------------------------------------------------------------------- */
+.paper[data-template="modern"][data-kind="front"] .nl-m-emblem {
+  display: flex;
+  justify-content: center;
+  padding: 0.05in 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-emblem svg {
+  width: 78%;
+  max-width: 1.75in;
+  height: auto;
+  display: block;
+}
+
+/* --- agenda lines (Modern rail) ------------------------------------------
+ * One centred line per entry. The date and event keep the data-bind paths the
+ * Contemporary table cells used, so binding and click-to-edit are unchanged;
+ * only the shape differs.
+ * ---------------------------------------------------------------------- */
+.paper[data-template="modern"][data-kind="front"] .nl-m-lines {
+  min-width: 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-line {
+  margin: 0 0 0.35em;
+  font-size: 1.06em;             /* ≈11pt */
+  line-height: 1.32;
+  text-align: center;
+  overflow-wrap: break-word;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-line:last-child {
+  margin-bottom: 0;
+}
+
+/* Inline, not table cells — the date runs straight into the event text. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-line-date,
+.paper[data-template="modern"][data-kind="front"] .nl-m-line-event {
+  display: inline;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-box-note {
+  margin-top: 0.14in;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* --- contact block -------------------------------------------------------- */
+/* Contemporary indents this block 0.35in and prints it with no heading; here
+ * it is a ruled block flush with its column. */
+.paper[data-template="modern"][data-kind="front"] .nl-schoolinfo {
+  padding-left: 0;
+  font-size: 1.06em;
+  line-height: 1.34;
+  text-align: left;
+}
+
+/* --- page-1 announcement sections ---------------------------------------- */
+/* Still full width beneath the columns (render.js explains why), so they read
+ * as a separate band rather than a fourth column. */
+.paper[data-template="modern"][data-kind="front"] .nl-articles {
+  display: block;
+  margin-top: 0.26in;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-article {
+  margin-bottom: 0.22in;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-article:last-child {
+  margin-bottom: 0;
+}
+
+/* --- announcements sheet: two columns ------------------------------------
+ * CSS multi-column rather than a grid, because the reference's columns pack
+ * independently (they are not row-aligned) and their split has to follow
+ * however many sections the issue has.
+ *
+ * `column-fill: balance` with an AUTO height is load-bearing. With a definite
+ * height the overflow would spill sideways into a third, clipped column;
+ * balancing to auto height makes an over-long issue grow DOWNWARDS instead,
+ * which is the overflow direction tier 2 is built to catch. (fit.js measures
+ * scrollWidth too, so the other way round would also be detected — but it
+ * would shrink the page for a reason the author cannot see.)
+ * ---------------------------------------------------------------------- */
+.paper[data-template="modern"][data-kind="announcements"] .nl-articles {
+  display: block;
+  column-count: 2;
+  column-gap: 0.33in;
+  column-fill: balance;
+  margin-top: 0.06in;
+}
+
+.paper[data-template="modern"][data-kind="announcements"] .nl-article {
+  break-inside: avoid;
+  page-break-inside: avoid;
+  margin: 0 0 0.4in;
+}
+
+/* A trailing margin on the last section in a column throws the balance off. */
+.paper[data-template="modern"][data-kind="announcements"] .nl-article:last-child {
+  margin-bottom: 0;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-article-body,
+.paper[data-template="modern"][data-kind="announcements"] .nl-article-body {
+  font-size: 1em;
+  line-height: 1.3;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-article-body p,
+.paper[data-template="modern"][data-kind="announcements"] .nl-article-body p {
+  margin: 0 0 0.8em;
+}
+
+/* --- running foot --------------------------------------------------------- */
+/* `margin-top:auto` is what pins this to the bottom of the flex flow. When the
+ * sheet is over-full the auto margin collapses to nothing and the foot is
+ * pushed past the trim — which is exactly what makes the overflow visible to
+ * tier 2 rather than quietly absorbed. */
+.paper[data-template="modern"][data-kind="front"] .nl-m-foot,
+.paper[data-template="modern"][data-kind="announcements"] .nl-m-foot {
+  /* Three tracks, not space-between: the site line has to be centred on the
+   * SHEET, and space-between would centre it on whatever is left over after
+   * the page number, which drifts as the number gains digits. */
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: baseline;
+  gap: 0.2in;
+  margin-top: auto;
+  padding-top: 0.06in;
+  border-top: 1.5px solid #000;
+  font-size: 1em;
+  line-height: 1.2;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-foot-site,
+.paper[data-template="modern"][data-kind="announcements"] .nl-m-foot-site {
+  grid-column: 2;
+  text-align: center;
+  min-width: 0;
+  overflow-wrap: break-word;
+}
+
+.paper[data-template="modern"][data-kind="front"] .nl-m-foot-num,
+.paper[data-template="modern"][data-kind="announcements"] .nl-m-foot-num {
+  grid-column: 3;
+  justify-self: end;
+  font-variant-numeric: tabular-nums;
+}
 
 
 /* =============================================================================
@@ -1262,5 +1659,43 @@
     .paper-flow .slip {
       transition: background-color 120ms ease-out, box-shadow 120ms ease-out;
     }
+  }
+}
+
+
+/* =============================================================================
+ * 09 — ARRANGE (screen only)
+ * -----------------------------------------------------------------------------
+ * The drag handle and indicator are app chrome (app.css section 24); the only
+ * thing the paper contributes is how a block looks while it is being carried.
+ * Wrapped in `@media screen` so none of it can reach the export — you cannot
+ * print mid-drag, but the rules have no business being in print.css either.
+ * ========================================================================== */
+@media screen {
+  .paper-flow [data-move] {
+    /* Outline rather than border/background: it must not affect layout, or
+     * picking a block up would reflow the page underneath the pointer. */
+    outline: 1px dashed transparent;
+    outline-offset: 2px;
+    transition: outline-color 120ms ease-out;
+  }
+
+  /* Only hint at movability once the pointer is actually over the block. */
+  .paper-flow [data-move]:hover {
+    outline-color: rgba(0, 51, 102, 0.28);
+  }
+
+  .paper-flow [data-move].is-dragging {
+    opacity: 0.4;
+    outline-color: rgba(0, 51, 102, 0.55);
+  }
+
+  /* Suppress the hint entirely during a page turn. */
+  .paper.is-turning .paper-flow [data-move]:hover { outline-color: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @media screen {
+    .paper-flow [data-move] { transition: none; }
   }
 }

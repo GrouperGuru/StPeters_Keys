@@ -223,7 +223,7 @@
   --rail-min:    300px;
   --rail-max:    640px;
   --resizer-w:   6px;
-  --thumb-h:     78px;
+  --thumb-h:     92px;
   --thumb-w:     46px;
   --stage-pad:   var(--sp-5);
   --scrollbar-w: 10px;
@@ -661,6 +661,20 @@ body.is-resizing #rail-resizer {
     box-shadow var(--dur-1) var(--ease-standard);
 }
 
+/* The template select does NOT shrink with the rest.
+ *
+ * .tb-select shrinks to a 68px floor on a narrow window, which is fine for
+ * "Font" and "Size" — those are pickers whose current value does not matter
+ * once chosen. This one always displays state, and "Contempo…" is exactly the
+ * ambiguity the dropdown exists to remove. The formatting group is the part
+ * designed to give up room, so let it. */
+.tb-select--template {
+  flex: 0 0 auto;
+  min-width: 132px;
+  max-width: none;
+  font-weight: var(--fw-semi);
+}
+
 .tb-select:hover {
   background-color: var(--surface-hover);
   border-color: var(--border-strong);
@@ -821,13 +835,20 @@ body.is-collapsed-rail #rail-resizer {
 }
 
 #editor-scroll {
+  /* Sticky offsets inside a scroller are measured from its PADDING box, so a
+   * sticky header with top:0 would pin one --rail-pad-top below the visible
+   * edge, leaving a gap for content to scroll through. The section header
+   * cancels this out by exactly this value; keeping it in one variable stops
+   * the two from drifting apart. */
+  --rail-pad-top: var(--sp-4);
+
   flex: 1 1 auto;
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   overscroll-behavior: contain;
-  padding: var(--sp-4) var(--sp-4) var(--sp-9);
+  padding: var(--rail-pad-top) var(--sp-4) var(--sp-9);
   scroll-behavior: smooth;
 
   /* Container queries drive .ed-cols so the 2→1 column collapse tracks the
@@ -848,13 +869,16 @@ body.is-collapsed-rail #rail-resizer {
  *   - collapsed fields are removed from the tab order for free.
  * Only the chevron animates. Robustness beats the flourish here.
  * ========================================================================== */
+/* NOTE: deliberately NOT `overflow: hidden`. That would make each .ed-section
+ * its own scrollport, and a sticky header inside a non-scrolling scrollport
+ * simply never sticks. The rounded corners it used to clip are now declared
+ * directly on the two children that reach them (.ed-head, .ed-body). */
 .ed-section {
   margin: 0 0 var(--sp-3);
   border: 1px solid var(--border-subtle);
   border-radius: var(--r-lg);
   background: var(--surface-raised);
   box-shadow: var(--sh-1);
-  overflow: hidden;
 }
 
 .ed-section:last-child { margin-bottom: 0; }
@@ -891,7 +915,16 @@ body.is-collapsed-rail #rail-resizer {
   box-shadow: inset 0 0 0 2px var(--focus);
 }
 
+/* Open sections keep their title in view while the body scrolls past. Only
+ * open ones: a closed section is exactly one header tall, so sticky there
+ * would have nothing to travel over.
+ *
+ * The background must stay fully opaque — fields scroll underneath it — which
+ * is why every .ed-head background above is a solid token, never a tint. */
 .ed-section.is-open > .ed-head {
+  position: sticky;
+  top: calc(-1 * var(--rail-pad-top, 0px));   /* see #editor-scroll */
+  z-index: 2;
   border-radius: var(--r-lg) var(--r-lg) 0 0;
   border-bottom: 1px solid var(--border-subtle);
   background: var(--surface-app);
@@ -978,11 +1011,22 @@ body.is-collapsed-rail #rail-resizer {
 
 /* --- section body ------------------------------------------------------- */
 .ed-body {
+  position: relative;   /* below the sticky header in paint order */
+  z-index: 1;
   padding: var(--sp-3);
+  border-radius: 0 0 var(--r-lg) var(--r-lg);
   background: var(--surface-raised);
 }
 
 .ed-section:not(.is-open) > .ed-body { display: none; }
+
+/* A jump-to-field scroll (editor.js focusPath) must not park a field
+ * underneath the sticky header. Roughly one header height of clearance. */
+#editor-scroll .ed-field,
+#editor-scroll .rt,
+#editor-scroll .pt,
+#editor-scroll .ed-card,
+#editor-scroll .ed-subpage { scroll-margin-top: 56px; }
 
 
 /* =============================================================================
@@ -1288,6 +1332,21 @@ textarea.pt {
   margin: 0;
   accent-color: var(--brand);
   cursor: pointer;
+}
+
+/* A checkbox still needs the `.pt` hook — that is what app.js keys its change
+ * handler off — but `.pt` is the TEXT-input box: full width, 32px tall, its own
+ * border and background. Undo that here so the hook costs nothing visually. */
+.ed-check input[type="checkbox"].pt,
+.ed-check input[type="radio"].pt {
+  display: inline-block;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
 }
 
 .ed-check input:focus-visible {
@@ -1742,12 +1801,12 @@ textarea.pt {
   display: flex;
   align-items: center;
   justify-content: center;
-  /* Wide enough that adjacent .thumb-label captions (max-width 64px, centred
-   * on a 46px sheet) clear each other. */
-  gap: var(--sp-5);
+  /* Captions are in normal flow and size their own item, so a plain gap is
+   * enough — they cannot collide. */
+  gap: var(--sp-3);
   height: var(--thumb-h);
   min-height: var(--thumb-h);
-  padding: var(--sp-2) var(--sp-4) var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
   overflow-x: auto;
   overflow-y: hidden;
   background: rgba(0, 0, 0, 0.26);
@@ -1757,10 +1816,29 @@ textarea.pt {
   user-select: none;
 }
 
+/* The button is a COLUMN — sheet on top, caption underneath — and its width is
+ * driven by whichever is wider. Page names like "Announcements 2" are much
+ * wider than the 46px sheet, and the caption used to be absolutely positioned
+ * and truncated to fit. Letting it size the item means captions can never
+ * collide with their neighbours and never need an ellipsis. */
 .thumb {
   position: relative;
   display: flex;
   flex: 0 0 auto;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: auto;
+  min-width: var(--thumb-w);
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+
+.thumb-sheet {
+  position: relative;
+  display: flex;
   align-items: flex-end;
   justify-content: center;
   width: var(--thumb-w);
@@ -1773,7 +1851,6 @@ textarea.pt {
       rgba(255, 255, 255, 0.92),
       rgba(255, 255, 255, 0.74));
   color: var(--n-700);
-  cursor: pointer;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
   transition:
     transform var(--dur-2) var(--ease-out),
@@ -1783,26 +1860,27 @@ textarea.pt {
 }
 
 /* page 4 — landscape 11 × 8.5 */
-.thumb[data-orientation="landscape"] {
+.thumb[data-orientation="landscape"] .thumb-sheet {
   width: 75px;
   height: 58px;
 }
 
-.thumb:hover {
+.thumb:hover .thumb-sheet {
   transform: translateY(-2px);
   border-color: rgba(255, 255, 255, 0.42);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.42);
   background: linear-gradient(to bottom, #fff, rgba(255, 255, 255, 0.86));
 }
 
-.thumb:active { transform: translateY(0); }
+.thumb:active .thumb-sheet { transform: translateY(0); }
 
-.thumb:focus-visible {
-  outline: none;
+.thumb:focus-visible { outline: none; }
+
+.thumb:focus-visible .thumb-sheet {
   box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--brand-300);
 }
 
-.thumb.is-active {
+.thumb.is-active .thumb-sheet {
   border-color: var(--brand-300);
   box-shadow: 0 0 0 2px var(--brand-400), 0 4px 12px rgba(0, 0, 0, 0.42);
   background: linear-gradient(to bottom, #fff, #f2f7fc);
@@ -1813,13 +1891,9 @@ textarea.pt {
  * app.js supplies a short label here and the full page name in title/aria-label,
  * so the max-width below should not normally truncate. */
 .thumb-label {
-  position: absolute;
-  top: calc(100% + 3px);
-  left: 50%;
-  transform: translateX(-50%);
-  max-width: 64px;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* In normal flow now, so it sets the button's width and no two captions can
+   * overlap. Padded so adjacent captions keep a little air between them. */
+  padding: 0 var(--sp-1);
   white-space: nowrap;
   font-size: var(--fs-10);
   line-height: 1;
@@ -1858,7 +1932,7 @@ textarea.pt {
 }
 
 /* Fold hint so a blank thumb still reads as a sheet of paper. */
-.thumb::before {
+.thumb-sheet::before {
   content: "";
   position: absolute;
   top: 6px;
@@ -1868,7 +1942,7 @@ textarea.pt {
   background: rgba(0, 0, 0, 0.10);
 }
 
-.thumb::after {
+.thumb-sheet::after {
   content: "";
   position: absolute;
   top: 11px;
@@ -2162,6 +2236,21 @@ textarea.pt {
   border-color: var(--brand-300);
 }
 
+/* Pressed state: --brand-800 is a near-black navy, chosen to read against the
+ * LIGHT --brand-100 tint. In dark mode --brand-100 is itself a dark navy, so
+ * the pair collapses to about 1.3:1. That hit the zoom button hardest — it
+ * reads "Fit" and is pressed by default, so its label was permanently almost
+ * invisible until hovered (hover re-lit it via .tb-btn--quiet:hover). Same
+ * tint, light ink: pressed now matches hover instead of contradicting it. */
+[data-theme="dark"] .tb-btn[aria-pressed="true"],
+[data-theme="dark"] .ed-btn[aria-pressed="true"]{
+  color: var(--text-strong);
+}
+
+[data-theme="dark"] .tb-btn[aria-pressed="true"]{
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.34);
+}
+
 [data-theme="dark"] .tb-logo{
   background: linear-gradient(160deg, var(--brand-500), var(--brand-800));
 }
@@ -2170,18 +2259,20 @@ textarea.pt {
 
 /* Thumbnails: keep them light (they represent white sheets) but dim slightly
  * so they don't glare on a dark chrome. */
-[data-theme="dark"] .thumb{
+[data-theme="dark"] .thumb-sheet{
   background: linear-gradient(to bottom,
     rgba(236, 240, 245, 0.86), rgba(214, 221, 230, 0.74));
   color: var(--n-800);
 }
 
-[data-theme="dark"] .thumb:hover{
+[data-theme="dark"] .thumb--add .thumb-sheet{ background: transparent; }
+
+[data-theme="dark"] .thumb:hover .thumb-sheet{
   background: linear-gradient(to bottom,
     rgba(246, 249, 252, 0.94), rgba(226, 233, 241, 0.84));
 }
 
-[data-theme="dark"] .thumb.is-active{
+[data-theme="dark"] .thumb.is-active .thumb-sheet{
   background: linear-gradient(to bottom, #f4f8fc, #e2edf7);
 }
 
@@ -3267,4 +3358,304 @@ textarea.pt {
 [data-theme="dark"] #editor-scroll .slip-term,
 [data-theme="dark"] #editor-scroll .slip-stepper-value {
   background: var(--surface-sunken);
+}
+
+
+/* =============================================================================
+ * 24 — ARRANGE (drag sections around the preview)
+ * -----------------------------------------------------------------------------
+ * The handle and the drop indicator live in an overlay ABOVE the stage, not
+ * inside `.paper`. Injecting them into the sheet would put them in front of
+ * the shrink-to-fit engine's measurements and would have to be stripped for
+ * print; keeping them in the chrome layer sidesteps both problems, and means
+ * print.css needs no rules for them at all.
+ * ========================================================================== */
+#arrange-layer {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-thumbs) - 1);
+  pointer-events: none;      /* the stage below must stay clickable */
+  overflow: hidden;
+}
+
+.arrange-handle {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;   /* straddle the block's top-left corner */
+  padding: 0;
+  border: 1px solid var(--brand-300);
+  border-radius: var(--r-sm);
+  background: var(--brand);
+  color: #fff;
+  cursor: grab;
+  pointer-events: auto;      /* the one interactive thing in the layer */
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+  transition: transform var(--dur-1) var(--ease-out);
+}
+
+.arrange-handle:hover  { transform: scale(1.12); }
+.arrange-handle:active { cursor: grabbing; transform: scale(1.02); }
+
+.arrange-handle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--canvas), 0 0 0 4px var(--brand-300);
+}
+
+.arrange-handle[hidden] { display: none; }
+
+/* Where the block will land. Sits above the paper, so it reads as an insertion
+ * point rather than as ink on the page. */
+.arrange-indicator {
+  position: absolute;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--brand-400);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7), 0 2px 6px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+
+.arrange-indicator[hidden] { display: none; }
+
+/* While a drag is in flight, keep the cursor consistent everywhere and stop
+ * the pointer selecting text as it sweeps across the page. */
+body.is-arranging,
+body.is-arranging * {
+  cursor: grabbing !important;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* A page thumbnail lit up as a cross-page drop target (arrange.js). Only one
+ * sheet is on screen at a time, so the thumbnails are how a block reaches a
+ * page that is not currently visible. */
+.thumb.is-drop-target .thumb-sheet {
+  border-color: var(--brand-300);
+  box-shadow: 0 0 0 3px var(--brand-400), 0 6px 16px rgba(0, 0, 0, 0.5);
+  transform: translateY(-3px);
+}
+
+.thumb.is-drop-target .thumb-label { color: #fff; }
+
+
+/* =============================================================================
+ * 25 — EXTRA ANNOUNCEMENT PAGES
+ * -----------------------------------------------------------------------------
+ * An issue is Front + N announcement pages + Slips + Calendar. The editor
+ * groups the sections of each announcement page, and the thumbnail rail gets
+ * an "Add page" shortcut so a page can be added without opening the rail.
+ * ========================================================================== */
+
+/* --- editor: one group per announcement page ----------------------------- */
+#editor-scroll .ed-subpage {
+  margin: 0 0 var(--sp-4);
+  padding: var(--sp-2) var(--sp-2) var(--sp-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--r-md);
+  background: var(--surface-app);
+}
+
+#editor-scroll .ed-subpage-head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-2);
+}
+
+#editor-scroll .ed-subpage-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 var(--sp-1);
+  border-radius: var(--r-pill);
+  background: var(--brand);
+  color: var(--text-invert);
+  font-size: var(--fs-11);
+  font-weight: var(--fw-semi);
+  font-variant-numeric: tabular-nums;
+}
+
+#editor-scroll .ed-subpage-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semi);
+  letter-spacing: var(--track-caps);
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+#editor-scroll .ed-add--page {
+  border-style: solid;
+  border-color: var(--brand-200);
+  color: var(--text-brand);
+  font-weight: var(--fw-semi);
+}
+
+#editor-scroll .ed-add--page:hover:not([disabled]) {
+  background: var(--brand-50);
+  border-color: var(--brand-300);
+}
+
+/* --- preview rail: the add-page shortcut --------------------------------- */
+/* Dashed and unfilled so it reads as an action, not as one of the sheets. */
+.thumb--add .thumb-sheet {
+  background: transparent;
+  border-style: dashed;
+  border-color: rgba(255, 255, 255, 0.30);
+  color: rgba(255, 255, 255, 0.72);
+  box-shadow: none;
+}
+
+.thumb--add .thumb-sheet::before,
+.thumb--add .thumb-sheet::after { content: none; }   /* no paper "fold" hint on an action */
+
+.thumb--add:hover:not([disabled]) .thumb-sheet {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.55);
+  color: #fff;
+}
+
+.thumb--add[disabled] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.thumb--add .thumb-plus {
+  font-size: 18px;
+  font-weight: var(--fw-regular);
+  line-height: 1;
+  margin-bottom: 2px;
+}
+
+.thumb--add .thumb-label { color: inherit; }
+
+[data-theme="dark"] #editor-scroll .ed-subpage { background: var(--surface-sunken); }
+
+
+/* =============================================================================
+ * 26 — FILE NAME DIALOG  (#name-dialog, .dlg-*)
+ * -----------------------------------------------------------------------------
+ * Shown before Save and before PDF export. A native <dialog> in the top layer,
+ * so it needs no z-index of its own and cannot be trapped by any ancestor's
+ * overflow or stacking context.
+ * ========================================================================== */
+.dlg {
+  width: min(420px, calc(100vw - 2 * var(--sp-5)));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface-raised);
+  color: var(--text);
+  box-shadow: var(--sh-4);
+}
+
+.dlg::backdrop {
+  background: rgba(9, 14, 22, 0.46);
+  backdrop-filter: blur(2px);
+}
+
+.dlg[open] { animation: dlg-in var(--dur-2) var(--ease-out); }
+
+@keyframes dlg-in {
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
+  to   { opacity: 1; transform: none; }
+}
+
+.dlg-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-4);
+}
+
+.dlg-title {
+  margin: 0;
+  font-size: var(--fs-15);
+  font-weight: var(--fw-semi);
+  color: var(--text-strong);
+}
+
+.dlg-note {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-12);
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.dlg-label {
+  font-size: var(--fs-12);
+  font-weight: var(--fw-semi);
+  color: var(--text-muted);
+}
+
+/* The extension is shown but not editable — it is decided by the action, not
+ * by the user, so it must not be something they can delete by accident. */
+.dlg-inputwrap {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-md);
+  background: var(--surface-input);
+  box-shadow: var(--sh-inset);
+}
+
+.dlg-inputwrap:focus-within {
+  border-color: var(--brand-400);
+  box-shadow: var(--field-ring);
+}
+
+.dlg-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 34px;
+  padding: 0 var(--sp-2);
+  border: 0;
+  border-radius: var(--r-md) 0 0 var(--r-md);
+  background: transparent;
+  color: var(--text-strong);
+  font: inherit;
+  font-size: var(--fs-13);
+}
+
+.dlg-input:focus { outline: none; }
+
+/* The placeholder IS the suggested name, so it has to read as a suggestion
+ * rather than as text already typed — otherwise nobody would think to just
+ * press Enter. Set explicitly: UA placeholder colours vary too much to trust. */
+.dlg-input::placeholder {
+  color: var(--text-subtle);
+  opacity: 1;                 /* Firefox dims placeholders by default */
+}
+
+.dlg-ext {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  padding: 0 var(--sp-2);
+  border-left: 1px solid var(--border-subtle);
+  color: var(--text-subtle);
+  font-size: var(--fs-12);
+  font-variant-numeric: tabular-nums;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.dlg-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dlg[open] { animation: none; }
 }

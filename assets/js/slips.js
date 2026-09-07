@@ -538,6 +538,20 @@
     return '</div></div>';
   }
 
+  /** Drag-to-reorder metadata (arrange.js, SPEC section 11). The label is what
+   *  the drag handle announces, so it falls back to the type when a box has no
+   *  usable heading text. */
+  function moveAttrs(slip, id) {
+    var type = normalizeType(slip && slip.type);
+    var meta = type ? TYPES[type] : null;
+    var raw = String((slip && (slip.heading || slip.text)) || '')
+      .replace(/<[^>]*>/g, ' ').replace(/&[a-z#0-9]+;/gi, ' ')
+      .replace(/\s+/g, ' ').trim();
+    var label = raw ? raw.slice(0, 40) : (meta ? meta.label : 'Box');
+    return ' data-move="slip" data-move-key="' + escAttr(id) +
+      '" data-move-label="' + escAttr(label) + '"';
+  }
+
   function slipPreviewHTML(slip, index) {
     var base = 'slips.' + index;
     var id = escAttr(slip && slip.id != null ? slip.id : base);
@@ -553,7 +567,8 @@
     if (type === 'starburst') {
       /* Not a [data-fit] box: the burst is a fixed-aspect graphic whose text
        * must stay centred on it. Page-level fit handles it. */
-      return '<div class="slip slip--starburst" data-slip-id="' + id + '">' +
+      return '<div class="slip slip--starburst" data-slip-id="' + id + '"' +
+        moveAttrs(slip, id) + '>' +
         burstHTML(slip, base + '.text') + '</div>';
     }
 
@@ -562,7 +577,8 @@
     else if (type === 'afterschool') inner = afterschoolInnerHTML(slip, base);
     else inner = customInnerHTML(slip, base);
 
-    return '<div class="slip slip--' + escAttr(type) + '" data-slip-id="' + id + '">' +
+    return '<div class="slip slip--' + escAttr(type) + '" data-slip-id="' + id +
+      '"' + moveAttrs(slip, id) + '>' +
       openFit(slip) + inner + closeFit() +
       '</div>';
   }
@@ -584,8 +600,10 @@
 
     return '' +
       '<div class="slip-cols">' +
-        '<div class="slip-col" data-col="left">' + cols.left + '</div>' +
-        '<div class="slip-col" data-col="right">' + cols.right + '</div>' +
+        '<div class="slip-col" data-col="left" data-drop="slip"' +
+          ' data-drop-col="left">' + cols.left + '</div>' +
+        '<div class="slip-col" data-col="right" data-drop="slip"' +
+          ' data-drop-col="right">' + cols.right + '</div>' +
       '</div>';
   }
 
