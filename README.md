@@ -180,6 +180,26 @@ request. The fix is to serve the folder with its own server — `node
 server/server.js`, then use the address **it** prints — or, if you don't need
 accounts, use the desktop launcher or open `index.html` directly.
 
+**To find out which of them it is**, on the machine holding the files:
+
+```sh
+node server/whats-serving.js               # the usual port, plus the usual suspects
+node server/whats-serving.js 8080          # some other port
+node server/whats-serving.js http://the-vm:8749/
+```
+
+It asks each address what it is and tells you what it found: our server (and
+whether it has accounts yet), some other web server handing out this folder as
+plain files, or nothing at all. It changes nothing and is safe to run any time.
+
+The case worth knowing about is **both at once** — our server running happily
+on its port while nginx or Apache, left over from when this was a static site,
+answers the address you actually typed. That looks exactly like a broken
+install and is not one; the script names the address that works.
+
+The panel itself also now prints the address it probed. If that isn't the
+address the server printed, that's the whole story: something else is on it.
+
 This used to fail much less helpfully: the app booted all the way into the
 editor and then reported "the server sent a reply this app could not read
 (HTTP 404)" the first time anybody touched an account. It now refuses to start
@@ -471,6 +491,7 @@ server/ratelimit.js     the sign-in backoff
 server/login.html       the sign-in page, served at /login
 server/setup.html       the first-run page, served at /setup
 server/reset-accounts.js  the way back in when the admin password is lost
+server/whats-serving.js   "the app says this is not its server" — what is it, then?
 server/README.md        running and deploying the server
 desktop/launch.js       starts the server in local mode and opens the browser
 desktop/StPeters-Keys.command   double-click launcher, macOS

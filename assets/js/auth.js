@@ -287,11 +287,41 @@
    *  appended as an observation rather than an explanation: it is the thing a
    *  person can quote when asking for help, but it is not the diagnosis, and
    *  the sentences above have to carry the meaning on their own. */
+  /* Name the exact address that was probed, not just the status.
+   *
+   * The first report of this panel in the field came from somebody who HAD
+   * started the server correctly — and was looking at a different address from
+   * the one it printed. "HTTP 404" alone cannot tell those apart, so it sent
+   * them hunting through the server they had already got right. The origin is
+   * the one fact that distinguishes "the server is not running" from "you are
+   * not looking at it", and the browser knows it for certain. */
   function apiMissingMessage(status) {
     var s = Number(status);
-    return API_MISSING_CAUSE + ' ' + API_MISSING_FIX +
-      (s > 0 ? ' (This address answered HTTP ' + s + ' where the app ' +
-               'expected the server’s own reply.)' : '');
+    var where;
+    try {
+      where = global.location.origin || (global.location.protocol + '//' +
+              global.location.host);
+    } catch (e) {
+      where = '';
+    }
+
+    var detail = '';
+    if (where) {
+      detail = ' (You are looking at ' + where + '. ' +
+        (s > 0 ? 'It answered HTTP ' + s + ' for ' + where +
+                 '/api/auth/state, where the app expected the server’s own ' +
+                 'reply. '
+               : 'It did not answer ' + where + '/api/auth/state as the ' +
+                 'server would. ') +
+        'If the server printed a DIFFERENT address — a different port, or ' +
+        'localhost when you are on another machine — open that one instead: ' +
+        'this one is being served by something else.)';
+    } else if (s > 0) {
+      detail = ' (This address answered HTTP ' + s + ' where the app ' +
+               'expected the server’s own reply.)';
+    }
+
+    return API_MISSING_CAUSE + ' ' + API_MISSING_FIX + detail;
   }
 
   /* The gate's footer notice normally quotes servedNotice(), which claims a
