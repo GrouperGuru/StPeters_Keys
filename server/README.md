@@ -181,7 +181,53 @@ service — these bring the app and its nginx proxy up and down together:
 ./server/alpine-stop.sh --dry-run # show what would be stopped
 ```
 
-Both need root, because `rc-service` does.
+Both need root, because `rc-service` and `/etc/nginx` do.
+
+**`alpine-start.sh` writes the nginx site config itself**, so a deployment
+script that clones the repo and runs it needs no manual nginx step. It writes
+`/etc/nginx/http.d/stpeters-keys.conf`: a `proxy_pass` to the app with the two
+headers that have to be right, and deliberately no `root`, `index` or
+`try_files` — those are what turn nginx into a file server for the checkout and
+produce the "This is not the St. Peter's Keys server" panel.
+
+```sh
+./server/alpine-start.sh --check-conf   # print the config, change nothing
+```
+
+| variable | default | |
+|---|---|---|
+| `KEYS_PORT` | `8749` | the port nginx forwards to |
+| `KEYS_SERVER_NAME` | *(catch-all)* | `server_name` for the site |
+| `KEYS_NGINX_CONF` | `/etc/nginx/http.d/stpeters-keys.conf` | where it is written |
+
+What it will and will not do to a box:
+
+- **Already correct** — says so and touches nothing. Re-running is free, which
+  is what makes it safe in a deploy script.
+- **Out of date** (you changed `KEYS_PORT`) — rewrites it, keeping the old one
+  as `.bak-<timestamp>`, and *reloads* nginx rather than restarting it, so
+  requests in flight are not dropped.
+- **A config it did not write** — refuses and changes nothing. Every generated
+  file carries a `managed-by:` marker on line 1; without that marker the file
+  is treated as yours. `--force-conf` overrides, after taking a backup. Delete
+  the marker line and the script will leave that file alone from then on.
+- **Alpine's stock `default.conf`** — renamed to `.disabled-by-keys`. It claims
+  `default_server` on port 80, and two of those is not a warning but a hard
+  nginx startup failure. It is renamed, never deleted.
+- **Somebody else's real site holding `default_server`** — left alone. Set
+  `KEYS_SERVER_NAME` and this site matches on the hostname instead; an exact
+  `server_name` wins over a `default_server` anyway. Without it the script
+  stops and explains, rather than guessing which site should own the box.
+- **A config that fails `nginx -t`** — rolled back to exactly what was there
+  before. Writing a config that stops nginx starting is worse than writing
+  nothing.
+
+The first run after `apk add nginx` needs no arguments:
+
+```sh
+apk add nodejs nginx
+./server/alpine-start.sh
+```
 
 **The order is deliberate and opposite in each.** nginx is the reverse proxy in
 front of the app, so:
@@ -206,8 +252,44 @@ the first run got half way.
 `--skip-nginx` on either script leaves nginx alone entirely, for when you are
 only interested in the app.
 
-Before starting nginx, `nginx -t` is run: a bad config otherwise fails with a
-terse init-script message, where `nginx -t` names the file and the line.
+The script also **creates nginx's pid directory if it is missing**, before it
+runs or reads nginx at all. `/run` is a tmpfs, emptied at every boot, and it is
+OpenRC's `start_pre` — not nginx — that recreates `/run/nginx`. Alpine's
+packaged init script does do that, so before `rc-service nginx start` this is
+usually redundant; it matters for anything that runs the nginx binary
+*directly*, which bypasses `start_pre` entirely. The path is read from the
+`pid ...;` line in `/etc/nginx/nginx.conf` rather than assumed, so a rebuilt
+package that keeps its pid somewhere else still works.
+
+If nginx fails to start, the script runs `nginx -t` afterwards and prints what
+it says — but **only after** a real failure, never as a gate beforehand. That
+distinction is worth knowing about, because `nginx -t` fails misleadingly on a
+fresh Alpine boot:
+
+```
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: [emerg] open() "/run/nginx/nginx.pid" failed (2: No such file or directory)
+nginx: configuration file /etc/nginx/nginx.conf test failed
+```
+
+The first line says the config is fine and the last calls it a failure. Both
+are true: the syntax *is* fine, and the test *did* fail — because `nginx -t`
+opens the pid file, `/run` is a tmpfs emptied at every boot, and `/run/nginx`
+is recreated by the init script's `start_pre` rather than by nginx itself. Run
+`nginx -t` on its own before nginx has been started since boot and you get
+this every time, on a perfectly healthy config.
+
+So if you see it, the fix is not in your config:
+
+```sh
+mkdir -p /run/nginx && chown nginx:nginx /run/nginx
+```
+
+`alpine-start.sh` now does that for you on every run, and `rc-service nginx
+start` does it too, so you should only meet this when running `nginx` by hand.
+An earlier version of `alpine-start.sh` used `nginx -t` as a pre-flight check
+and consequently refused to start an nginx that would have started perfectly
+well. There is a comment in the script saying not to put it back.
 
 Both are `#!/bin/sh`, not `#!/bin/bash`, and that is deliberate: Alpine has no
 bash in the base image, and a bash shebang fails with "not found" — which
@@ -321,8 +403,25 @@ and by nobody else (`chmod 600`, owned by `keys`). TLS 1.2 is the floor.
 
 ### Or: terminate it in front
 
-Any reverse proxy will do. The one thing it **must** do is tell the server that
-the browser is on HTTPS, and the server must be told to believe it:
+Any reverse proxy will do, but it must do **two** things, and each one fails in
+its own way if you miss it:
+
+1. **Pass the browser's `Host` through unchanged.** nginx does *not* do this by
+   default — `proxy_pass` sets `Host` to the backend address. Sign-in then
+   fails with **403 `CSRF`** while everything else on the site works, because
+   the CSRF check compares the browser's `Origin` against `Host` and they no
+   longer match.
+2. **Say whether the browser is on HTTPS**, with the server told to believe it
+   via `KEYS_TRUST_PROXY=1`. Get this wrong and the session cookie is not
+   marked `Secure`.
+
+Measured against the real server, one wrong line at a time:
+
+| proxy config | sign-in | cookie `Secure` |
+|---|---|---|
+| `Host $host` + correct `X-Forwarded-Proto` | works | yes |
+| `Host` left at the `proxy_pass` default | **403 `CSRF`** | — |
+| `Host $host`, `X-Forwarded-Proto` wrong or absent | works | **no** |
 
 ```nginx
 server {
@@ -348,6 +447,73 @@ server {
 ```
 
 …with `KEYS_TRUST_PROXY=1` on the service.
+
+### When something else terminates TLS further out
+
+That example assumes **nginx itself** holds the certificate, which is why
+`X-Forwarded-Proto $scheme` is right there: `$scheme` is `https` at a `listen
+443 ssl` block.
+
+It is **wrong** for a chain like Cloudflare → Caddy → nginx → app, where nginx
+listens on plain HTTP inside a container. There `$scheme` is `http`, so the app
+is told the browser is on plain HTTP, and the session cookie loses its `Secure`
+flag on a site that is HTTPS end to end. What you want is to forward the header
+the upstream proxy already sent, falling back to `$scheme` only if there is
+none:
+
+```nginx
+# at http{} level, outside any server block
+map $http_x_forwarded_proto $keys_proto {
+  default $http_x_forwarded_proto;   # trust what Caddy/Cloudflare said
+  ''      $scheme;                   # direct hit: use our own scheme
+}
+
+server {
+  listen 80;
+  server_name keys.example.org;
+
+  # NOTHING here may serve these files directly — no root, no index, no
+  # try_files pointing at the checkout. See the warning below.
+  location / {
+    proxy_pass http://127.0.0.1:8749;
+    proxy_http_version 1.1;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $keys_proto;
+  }
+}
+```
+
+`$proxy_add_x_forwarded_for` *appends* to the existing header rather than
+replacing it, so the browser's own address stays at the front where the rate
+limiter looks for it. `$remote_addr` — as in the example above, which has only
+one hop — would overwrite the real client with the address of the proxy in
+front, and every visitor would then share one rate-limit budget.
+
+### The other trap: nginx serving the files instead of proxying them
+
+If nginx is configured with a `root` pointing at this checkout, the site half
+works in a way that looks like an application bug. nginx hands over
+`index.html` and the JavaScript perfectly well, the newsletter appears — and
+then every `/api/...` request 404s, because there is no *file* by that name.
+The app notices and shows a panel headed **"This is not the St. Peter's Keys
+server"**.
+
+The fix is to proxy rather than serve: a `location /` with `proxy_pass` and no
+`root`, `index` or `try_files` for this site. To confirm that is what is
+happening, ask each layer in turn, on the box itself:
+
+```sh
+curl -s -o /dev/null -w 'app direct : %{http_code}\n' \
+     http://127.0.0.1:8749/api/auth/state
+curl -s -o /dev/null -w 'via nginx  : %{http_code}\n' \
+     -H 'Host: keys.example.org' http://127.0.0.1/api/auth/state
+```
+
+`200` then `404` is exactly this: the app is healthy and nginx is not sending
+it the request. `node server/whats-serving.js` reaches the same conclusion from
+the outside.
 
 `X-Forwarded-For` and `X-Forwarded-Proto` are only believed when
 `KEYS_TRUST_PROXY` is set, and that guard is not ceremony. Without it anybody
