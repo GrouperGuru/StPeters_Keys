@@ -82,9 +82,14 @@ const PORT_BASE = 8780;
 let nextPort = PORT_BASE;
 const spawned = [];          // every child this run created, and nothing else
 
-function startServer(env) {
-  const port = nextPort++;
-  if (port > 8799) throw new Error('ran out of ports in the 8780-8799 range');
+function startServer(env, opts) {
+  /* `opts.port` lets a caller take a socket from a range of its own — the two
+   * sections at the end of this file use 8850-8869 — instead of the shared
+   * counter below. */
+  const port = (opts && opts.port) || nextPort++;
+  if (!(opts && opts.port) && port > 8799) {
+    throw new Error('ran out of ports in the 8780-8799 range');
+  }
 
   // A fresh KEYS_DATA every time: these checks are about first-run behaviour
   // as much as anything, and an inherited accounts.json would skip it.
@@ -207,6 +212,153 @@ function readAccountsFile(server) {
     mode: fs.statSync(file).mode & 0o777,
     data: JSON.parse(raw)
   };
+}
+
+/* ---------------------------------------------------------------------------
+ * A SECOND port range, 8850-8869, for the two sections at the end of this file
+ * — the wrong-server panel and local mode. Kept apart from 8780-8799 above so
+ * that a static file server, a desktop-mode server and the served checks'
+ * own sockets cannot collide, and so a socket left in TIME_WAIT by one of
+ * them cannot be handed to another. Everything spawned here is recorded and
+ * stopped like everything else: only ever our own PIDs.
+ * ------------------------------------------------------------------------ */
+const EXTRA_PORT_BASE = 8850;
+let nextExtraPort = EXTRA_PORT_BASE;
+function extraPort() {
+  if (nextExtraPort > 8869) {
+    throw new Error('ran out of ports in the 8850-8869 range');
+  }
+  return nextExtraPort++;
+}
+
+/** `python3 -m http.server` on the repository root — not a stub, but the exact
+ *  misconfiguration reported from the field: something that hands over
+ *  index.html and every asset with 200 and then answers 404, in HTML, to every
+ *  /api/ path. Bound to loopback so a check cannot publish the repository to
+ *  the network on its way past. */
+function startStaticServer() {
+  const port = extraPort();
+  const proc = spawn('python3',
+    ['-m', 'http.server', String(port), '--bind', '127.0.0.1'],
+    { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let log = '';
+  proc.stdout.on('data', d => { log += d; });
+  proc.stderr.on('data', d => { log += d; });
+
+  const server = {
+    proc, port, dir: null,
+    base: 'http://127.0.0.1:' + port,
+    log: () => log,
+    stopped: false,
+    stop() {
+      if (this.stopped) return Promise.resolve();
+      this.stopped = true;
+      try { proc.kill('SIGTERM'); } catch (e) {}
+      return new Promise(r => {
+        const done = setTimeout(() => { try { proc.kill('SIGKILL'); } catch (e) {} r(); }, 3000);
+        proc.on('exit', () => { clearTimeout(done); r(); });
+      });
+    }
+  };
+  spawned.push(server);
+  return server;
+}
+
+/** Wait until something answers `GET /` — the static server has no API route
+ *  to poll, which is the entire point of it. */
+async function waitForStatic(server, timeoutMs) {
+  const until = Date.now() + (timeoutMs || 15000);
+  for (;;) {
+    const res = await req(server, 'GET', '/');
+    if (res.status === 200) return true;
+    if (Date.now() > until) return false;
+    await new Promise(r => setTimeout(r, 120));
+  }
+}
+
+/** Start the server and wait for it to STOP, reporting how it went. Used for
+ *  the local-mode interlock, where the whole assertion is that the process
+ *  refuses to run: it is never registered as a long-lived child because it
+ *  ends by itself, and it is killed if it somehow does not. */
+function startServerExpectingExit(env, timeoutMs) {
+  const port = extraPort();
+  const proc = spawn(process.execPath, [SERVER_JS], {
+    /* No KEYS_DATA and no KEYS_HOST of our own: the refusal has to be decided
+     * by what the caller sets, and the data directory must be left at its
+     * default so "local mode creates nothing" can be checked afterwards. */
+    env: Object.assign({}, process.env,
+      { KEYS_PORT: String(port), KEYS_DATA: undefined, KEYS_HOST: undefined },
+      env || {}),
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+
+  let log = '';
+  proc.stdout.on('data', d => { log += d; });
+  proc.stderr.on('data', d => { log += d; });
+
+  return new Promise((resolve) => {
+    let timedOut = false;
+    const killer = setTimeout(() => {
+      timedOut = true;
+      try { proc.kill('SIGKILL'); } catch (e) {}
+    }, timeoutMs || 8000);
+    proc.on('exit', (code, signal) => {
+      clearTimeout(killer);
+      resolve({ code, signal, log, port, timedOut });
+    });
+  });
+}
+
+/** Every address one of our own processes is listening on, as the operating
+ *  system sees it — `127.0.0.1:8858` or `*:8858`. null if lsof is unavailable,
+ *  which is a warning rather than a failure: the check that matters is asked a
+ *  second way, over TCP. */
+function listeningAddresses(pid) {
+  try {
+    const { execFileSync } = require('child_process');
+    const out = execFileSync('lsof',
+      ['-nP', '-iTCP', '-sTCP:LISTEN', '-a', '-p', String(pid)],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    return out.split('\n')
+      .map(l => (l.match(/TCP\s+(\S+)\s+\(LISTEN\)/) || [])[1])
+      .filter(Boolean);
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Can anything be connected to at host:port? Resolves 'connected', or the
+ *  error code ('ECONNREFUSED' when nothing is listening). */
+function tcpProbe(host, port, timeoutMs) {
+  const net = require('net');
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      try { sock.destroy(); } catch (e) {}
+      resolve(v);
+    };
+    const sock = net.connect({ host, port });
+    sock.setTimeout(timeoutMs || 2000);
+    sock.on('connect', () => done('connected'));
+    sock.on('timeout', () => done('ETIMEDOUT'));
+    sock.on('error', (e) => done(e.code || 'error'));
+  });
+}
+
+/** This machine's own address on the network — the one an unauthenticated
+ *  server on 0.0.0.0 would be reachable at from every other machine, and
+ *  therefore the most important value the interlock has to refuse. */
+function lanAddress() {
+  const nics = os.networkInterfaces();
+  for (const name of Object.keys(nics)) {
+    for (const a of nics[name] || []) {
+      if (a.family === 'IPv4' && !a.internal) return a.address;
+    }
+  }
+  return null;
 }
 
 /* ---------------------------------------------------------------------------
@@ -4881,6 +5033,650 @@ async function main() {
 
   await idleCtx.close();
   await idleSrv.stop();
+
+  /* ==================================================== the wrong server ====
+   * "THE ADMINISTRATOR COULD NOT ADD USERS, AND SIGN OUT SAID HTTP 404."
+   *
+   * That was the field report, and it was one cause wearing two faces: the
+   * folder was being served by a plain file server rather than by
+   * server/server.js, so GET / returned 200, every /api/* returned a code-less
+   * 404, and the client — which trusted location.protocol and nothing else —
+   * booted all the way into a usable-looking editor that could not touch an
+   * account. Booting into a broken editor IS the bug; these checks are here so
+   * it cannot come back quietly.
+   *
+   * The fixture is not a stub. It is `python3 -m http.server` on the
+   * repository root: exactly what the reporter had.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — the wrong server is answering');
+
+  const stat = startStaticServer();
+  const statUp = await waitForStatic(stat);
+  check('a plain file server is serving the repository root',
+    statUp === true, statUp ? stat.base : stat.log().slice(0, 300));
+
+  const statRoot = await req(stat, 'GET', '/');
+  const statApi = await req(stat, 'GET', '/api/auth/state');
+  /* The fixture has to reproduce the misconfiguration before anything about
+   * the response to it means very much: 200 for the app, and a reply with no
+   * `code` in it for the API. That absent `code` is the whole classifier —
+   * AUTH-API §9 — so it is asserted rather than assumed. */
+  check('it hands over the app with 200 and answers the API with a code-less 404',
+    statRoot.status === 200 && /St\. Peter/i.test(statRoot.text) &&
+    statApi.status === 404 && !(statApi.json && statApi.json.code),
+    `/ -> ${statRoot.status}, /api/auth/state -> ${statApi.status} ` +
+    JSON.stringify(statApi.json));
+
+  const noApiCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+  /* Counted, because how MANY times the client asks is itself a requirement
+   * further down. continue() only, so nothing is faked. */
+  let statePolls = 0;
+  await noApiCtx.route('**/api/auth/state*', (route) => {
+    statePolls++;
+    return route.continue();
+  });
+  const noApiPage = await noApiCtx.newPage();
+  const noApiErrors = [];
+  noApiPage.on('pageerror', e => noApiErrors.push('pageerror: ' + e.message));
+
+  await noApiPage.goto(stat.base + '/', { waitUntil: 'domcontentloaded' });
+  await noApiPage.waitForFunction(() => {
+    const g = document.getElementById('auth-gate');
+    return !!g && g.hidden === false;
+  }, null, { timeout: 20000 }).catch(() => {});
+  await noApiPage.waitForTimeout(900);
+  const pollsAtBoot = statePolls;
+
+  const wrongSrv = await noApiPage.evaluate(() => {
+    const app = document.getElementById('app');
+    const gate = document.getElementById('auth-gate');
+    const txt = id => ((document.getElementById(id) || {}).textContent || '')
+      .replace(/\s+/g, ' ').trim();
+    return {
+      gateShown: !!gate && gate.hidden === false,
+      papers: document.querySelectorAll('#page-stage .paper').length,
+      appDisplay: app ? getComputedStyle(app).display : null,
+      appInert: app ? app.hasAttribute('inert') : null,
+      formHidden: (document.getElementById('auth-form') || {}).hidden,
+      retryShown: !!(document.getElementById('auth-retry') &&
+        document.getElementById('auth-retry').hidden === false),
+      title: txt('auth-title'),
+      lead: txt('auth-lead'),
+      note: txt('auth-note'),
+      panel: (gate ? gate.textContent : '').replace(/\s+/g, ' ').trim()
+    };
+  });
+
+  check('the blocking panel is up', wrongSrv.gateShown === true,
+    String(wrongSrv.gateShown));
+  /* The bug was not "an error appeared". The bug was that the editor opened. */
+  check('the editor never opens — not one sheet is rendered',
+    wrongSrv.papers === 0, 'papers=' + wrongSrv.papers);
+  check('the app is hidden AND inert, not merely covered over',
+    wrongSrv.appDisplay === 'none' && wrongSrv.appInert === true,
+    `display=${wrongSrv.appDisplay} inert=${wrongSrv.appInert}`);
+  /* A password box in front of a static file server would take a real
+   * password, post it to something that has never heard of /api/auth/signin,
+   * and report a failure that reads as "you typed it wrong". */
+  check('no sign-in form is offered, because there is nothing behind it',
+    wrongSrv.formHidden === true, String(wrongSrv.formHidden));
+  check('a "Try again" button is offered, for when the real server is started',
+    wrongSrv.retryShown === true, String(wrongSrv.retryShown));
+  check('the message names the cause — the wrong program is answering',
+    /not the St\. Peter/i.test(wrongSrv.title) &&
+    /is being served by something that is not/i.test(wrongSrv.note),
+    wrongSrv.title);
+  check('it says how to get accounts back, by name',
+    /node server\/server\.js/.test(wrongSrv.note),
+    wrongSrv.note.slice(0, 120));
+  /* Failing closed with no way forward would be a different bug: the
+   * newsletter itself works perfectly from disk and accounts are no part of
+   * it, so the offline route has to be on the panel. */
+  check('and how to carry on without them, so nobody is trapped',
+    /index\.html/.test(wrongSrv.note), wrongSrv.note.slice(0, 160));
+  /* "The server sent a reply this app could not read (HTTP 404)" was true,
+   * useless, and blamed the server for something the server never did. */
+  check('the old "could not read" wording appears nowhere on the panel',
+    !/could not read/i.test(wrongSrv.panel),
+    wrongSrv.panel.slice(0, 140));
+
+  /* AUTH-API §9: a code-less reply is POSITIVE evidence and is identical next
+   * time, so it is not retried — three attempts against a file server would
+   * only make somebody wait three times as long for the same explanation. The
+   * transient case, which IS retried, is the section after this one. */
+  check('a code-less reply is not retried — one request, one verdict',
+    pollsAtBoot === 1, 'state requests during boot: ' + pollsAtBoot);
+
+  const noApiCalls = await noApiPage.evaluate(async () => {
+    const A = window.Keys.Auth;
+    return {
+      signOut: await A.signOut(),
+      addUser: await A.addUser('Someone New', 'a-good-passphrase', 'user'),
+      users: await A.users(),
+      removeUser: await A.removeUser('Someone New'),
+      changePassword: await A.changePassword('a-good-passphrase', 'another-passphrase')
+    };
+  });
+  /* The two faces of the report, and the three neighbours that would have
+   * failed the same way. Each resolves the actionable sentence, not a status:
+   * a caller branching on `code` gets NO_API, and a person reading the error
+   * gets told to run the server. */
+  for (const call of ['signOut', 'addUser', 'users', 'removeUser', 'changePassword']) {
+    const r = noApiCalls[call] || {};
+    check(`${call}() resolves NO_API with the sentence that names the fix`,
+      r.code === 'NO_API' && /node server\/server\.js/.test(r.error || '') &&
+      !/could not read/i.test(r.error || ''),
+      JSON.stringify(r).slice(0, 170));
+  }
+
+  const noApiDiag = await noApiPage.evaluate(() => window.Keys.Auth.diagnose());
+  /* First line, ahead of every other reading in the object: "not signed in"
+   * and "no accounts" are meaningless when they were read from a program that
+   * has never heard of an account, and whoever is reading diagnose() is
+   * reading it because accounts are behaving oddly. */
+  check('diagnose() names the misconfiguration before anything else',
+    /^wrong server/i.test(String(noApiDiag.summary || '').trim()),
+    String(noApiDiag.summary).slice(0, 120));
+  check('diagnose() reports the API as absent',
+    noApiDiag.apiPresent === false, 'apiPresent=' + noApiDiag.apiPresent);
+
+  check('no unhandled page errors while the panel is up',
+    noApiErrors.length === 0, noApiErrors.slice(0, 3).join(' | '));
+
+  await noApiCtx.close();
+  await stat.stop();
+
+  /* ============================================== absent vs transient ======
+   * THE DISCRIMINATION THAT MATTERS MOST.
+   *
+   * "Absent" and "unreachable" are different, and conflating them loses work.
+   * A code-less reply is evidence about the program on the other end; a
+   * rejected fetch is evidence about nothing at all. If the section above were
+   * implemented by treating every failure as the wrong server, a momentary
+   * network blip would evict an author from a half-written issue — which is a
+   * worse bug than the one being fixed.
+   *
+   * Run against the REAL server, signed in, with Playwright aborting requests
+   * so the transient class is genuinely transient: no status, no body,
+   * nothing heard back.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — a network blip is not a misconfiguration');
+
+  const blipSrv = startServer({}, { port: extraPort() });
+  const blipUp = await waitForServer(blipSrv);
+  check('a real server starts for the blip checks', blipUp === true,
+    blipUp ? blipSrv.base : blipSrv.log().slice(0, 300));
+
+  const blipToken = fs.readFileSync(
+    path.join(blipSrv.dir, 'setup-token.txt'), 'utf8').trim();
+
+  const blipCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+  /* One knob, read on every state request: how many of the next ones to drop.
+   * abort() is a rejected fetch in the page — no status, no body — which is
+   * exactly the class under test. */
+  const blip = { polls: 0, dropNext: 0 };
+  await blipCtx.route('**/api/auth/state*', (route) => {
+    blip.polls++;
+    if (blip.dropNext > 0) { blip.dropNext--; return route.abort('failed'); }
+    return route.continue();
+  });
+
+  const blipPage = await blipCtx.newPage();
+  const blipErrors = [];
+  blipPage.on('pageerror', e => blipErrors.push('pageerror: ' + e.message));
+  blipPage.on('console', m => { if (m.type() === 'error') blipErrors.push('console: ' + m.text()); });
+
+  await blipPage.goto(blipSrv.base + '/', { waitUntil: 'domcontentloaded' });
+  await blipPage.fill('#token', blipToken);
+  await blipPage.fill('#name', ADMIN_NAME);
+  await blipPage.fill('#password', ADMIN_PW);
+  await blipPage.fill('#confirm', ADMIN_PW);
+  await Promise.all([
+    blipPage.waitForNavigation({ waitUntil: 'load', timeout: 20000 }).catch(() => {}),
+    blipPage.click('#submit')
+  ]);
+  await blipPage.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 20000 });
+  await blipPage.waitForTimeout(600);
+
+  /* --- one dropped request at boot --------------------------------------- */
+  blip.polls = 0;
+  blip.dropNext = 1;
+  await blipPage.reload({ waitUntil: 'domcontentloaded' });
+  await blipPage.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 20000 }).catch(() => {});
+  await blipPage.waitForTimeout(900);
+
+  const afterBlip = await blipPage.evaluate(() => ({
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    gateHidden: (document.getElementById('auth-gate') || {}).hidden,
+    locked: document.body.classList.contains('is-locked'),
+    me: (window.Keys.Auth.currentUser() || {}).name,
+    title: ((document.getElementById('auth-title') || {}).textContent || '').trim()
+  }));
+  /* Getting this wrong means one unlucky request at load evicts an author
+   * from their work and shows them a panel accusing their administrator of
+   * running the wrong program. */
+  check('a single dropped request at boot is retried, and the app boots normally',
+    afterBlip.papers === 4 && afterBlip.gateHidden === true &&
+    afterBlip.locked === false && afterBlip.me === ADMIN_NAME,
+    JSON.stringify(afterBlip));
+  check('the retry is a second request, not a second guess',
+    blip.polls === 2, 'state requests: ' + blip.polls);
+
+  /* --- a genuine refusal, on the same server, unchanged ------------------- */
+  const badPw = await blipPage.evaluate(
+    n => window.Keys.Auth.signIn(n, 'definitely-not-the-passphrase'), ADMIN_NAME);
+  const badPwDiag = await blipPage.evaluate(() => window.Keys.Auth.diagnose());
+  /* The classifier is response SHAPE, not status code, and that has to leave
+   * the server's own refusals completely alone. A 401 that carries a `code` is
+   * the server talking, and its sentence is the one to show. */
+  check('a wrong password still gives the server\'s own sentence, not the wrong-server panel',
+    badPw.code === 'BAD_CREDENTIALS' &&
+    /do not match/i.test(badPw.error || '') &&
+    !/not the St\. Peter/i.test(badPw.error || ''),
+    JSON.stringify(badPw).slice(0, 170));
+  check('and the API is still considered present after a genuine refusal',
+    badPwDiag.apiPresent === true && badPwDiag.gateShowing === false,
+    `apiPresent=${badPwDiag.apiPresent} gate=${badPwDiag.gateShowing}`);
+
+  /* --- dropped requests mid-session -------------------------------------- */
+  blip.dropNext = 6;                      // every state request from here
+  const midBlip = await blipPage.evaluate(async () => {
+    const verdict = await window.Keys.Auth.checkIdle();
+    await new Promise(r => setTimeout(r, 500));
+    const gate = document.getElementById('auth-gate');
+    return {
+      verdict,
+      gateShown: !!gate && gate.hidden === false,
+      relocked: document.body.classList.contains('is-relocked'),
+      papers: document.querySelectorAll('#page-stage .paper').length,
+      me: (window.Keys.Auth.currentUser() || {}).name
+    };
+  });
+  blip.dropNext = 0;
+
+  /* AUTH-API §9: only a server that actually answers may end a session.
+   * 'unknown' means we could not reach it; 'expired' means it was reached and
+   * said no. Collapsing the two puts the gate over somebody's unsaved issue
+   * because their wifi dropped for a moment. */
+  check('an unreachable server leaves checkIdle() at \'unknown\', never \'expired\'',
+    midBlip.verdict === 'unknown', String(midBlip.verdict));
+  check('and the gate stays down over a running editor',
+    midBlip.gateShown === false && midBlip.relocked === false &&
+    midBlip.papers === 4 && midBlip.me === ADMIN_NAME,
+    JSON.stringify(midBlip));
+
+  const blipRealErrors = blipErrors.filter(e => !REFUSALS.test(e) &&
+    !/Failed to fetch|net::ERR_FAILED|ERR_ABORTED/i.test(e));
+  check('no unexpected page or console errors through the blips',
+    blipRealErrors.length === 0, blipRealErrors.slice(0, 4).join(' | '));
+
+  await blipCtx.close();
+  await blipSrv.stop();
+
+  /* ======================================================= local mode ======
+   * THE DESKTOP APP (KEYS_LOCAL=1), and the one interlock it rests on.
+   *
+   * Local mode has no authentication whatsoever: no gate, no accounts, no
+   * sessions, no setup token. What makes that safe is a single rule in
+   * server/server.js — the listen address is 127.0.0.1, full stop, and the
+   * server refuses to start if KEYS_HOST asks for anything else. "No
+   * authentication" plus 0.0.0.0 publishes the newsletter, and a working
+   * editor for it, to every machine on the network, and looks — from the
+   * machine that started it — exactly like a working desktop app. The failure
+   * is total and silent, which is why the interlock is checked first and from
+   * both sides: the process must not run, AND no socket must appear.
+   * ---------------------------------------------------------------------- */
+  section('Accounts — the desktop app (local mode): the loopback interlock');
+
+  const lan = lanAddress();
+  const refusedHosts = ['0.0.0.0', 'localhost', '::1'];
+  if (lan) refusedHosts.push(lan);
+  else warn('no LAN address on this machine to test the interlock against');
+
+  for (const host of refusedHosts) {
+    const attempt = await startServerExpectingExit(
+      { KEYS_LOCAL: '1', KEYS_HOST: host });
+    const reachable = await tcpProbe('127.0.0.1', attempt.port);
+    check(`KEYS_LOCAL=1 with KEYS_HOST=${host} exits non-zero and binds nothing`,
+      attempt.code !== 0 && attempt.timedOut === false &&
+      reachable === 'ECONNREFUSED',
+      `exit=${attempt.code} signal=${attempt.signal} port ${attempt.port} -> ${reachable}`);
+  }
+
+  const refusalLog = (await startServerExpectingExit(
+    { KEYS_LOCAL: '1', KEYS_HOST: '0.0.0.0' })).log;
+  /* The refusal has to explain the danger, not merely cite the rule. Somebody
+   * who set KEYS_HOST=0.0.0.0 was trying to reach the app from another
+   * machine, and "refusing to start" on its own reads as a bug in the server
+   * rather than as a warning about what they very nearly did. */
+  check('the refusal explains the danger, not just the rule',
+    /refusing to start/i.test(refusalLog) &&
+    /every machine on the network/i.test(refusalLog) &&
+    /127\.0\.0\.1/.test(refusalLog),
+    refusalLog.replace(/\s+/g, ' ').slice(0, 200));
+
+  const explicitLoopback = startServer(
+    { KEYS_LOCAL: '1', KEYS_DATA: undefined }, { port: extraPort() });
+  const explicitUp = await waitForServer(explicitLoopback);
+  check('KEYS_HOST=127.0.0.1 — the one accepted spelling — starts normally',
+    explicitUp === true, explicitUp ? explicitLoopback.base
+      : explicitLoopback.log().slice(0, 300));
+  await explicitLoopback.stop();
+
+  /* envFlag() accepts the word as well as the digit, and desktop/README and
+   * the launchers are free to use either — so both have to work. */
+  const wordForm = startServer(
+    { KEYS_LOCAL: 'true', KEYS_HOST: undefined, KEYS_DATA: undefined },
+    { port: extraPort() });
+  const wordUp = await waitForServer(wordForm);
+  const wordState = await req(wordForm, 'GET', '/api/auth/state');
+  check('KEYS_LOCAL=true, the word, is honoured exactly like the digit',
+    wordUp === true && wordState.json && wordState.json.mode === 'local',
+    wordUp ? JSON.stringify(wordState.json && wordState.json.mode)
+      : wordForm.log().slice(0, 300));
+  await wordForm.stop();
+
+  section('Accounts — the desktop app (local mode)');
+
+  /* KEYS_HOST unset, which is how desktop/launch.js runs it, and KEYS_DATA
+   * unset too so the "nothing is created" check below has something to prove.
+   * There is deliberately no accounts file, no token and no session anywhere
+   * in this section. */
+  const localSrv = startServer(
+    { KEYS_LOCAL: '1', KEYS_HOST: undefined, KEYS_DATA: undefined },
+    { port: extraPort() });
+  const localUp = await waitForServer(localSrv);
+  check('with KEYS_HOST unset, the desktop server starts', localUp === true,
+    localUp ? localSrv.base : localSrv.log().slice(0, 400));
+
+  const bound = listeningAddresses(localSrv.proc.pid);
+  if (bound === null) {
+    warn('lsof unavailable — the listening address was checked over TCP only');
+  } else {
+    /* `*:8858` is the shape of the disaster: one wildcard bind is the whole
+     * difference between a desktop app and an unauthenticated editor published
+     * to the parish network. */
+    check('it is listening on 127.0.0.1 only, not on *',
+      bound.length === 1 && bound[0] === '127.0.0.1:' + localSrv.port,
+      bound.join(', ') || 'nothing listening');
+  }
+  if (lan) {
+    const fromLan = await tcpProbe(lan, localSrv.port);
+    /* The same question the OS was asked above, asked again over TCP, because
+     * this is the one that would actually hurt: a wildcard bind ACCEPTS this
+     * connection (verified — it resolves 'connected'), and loopback-only never
+     * does. Whether the refusal arrives as ECONNREFUSED or as silence depends
+     * on the host firewall and is not the app's business; "no connection" is. */
+    check('and nothing answers at this machine\'s own network address',
+      fromLan !== 'connected', lan + ':' + localSrv.port + ' -> ' + fromLan);
+  }
+
+  /* --- the routes, per AUTH-API §4a -------------------------------------- */
+  const localRoot = await req(localSrv, 'GET', '/');
+  check('GET / is the app itself — 200, no gate, no redirect',
+    localRoot.status === 200 && /St\. Peter/i.test(localRoot.text) &&
+    /id="page-stage"/.test(localRoot.text) && !localRoot.headers.location,
+    localRoot.status + ' ' + (localRoot.headers['content-type'] || ''));
+
+  for (const p of ['/login', '/setup']) {
+    const res = await req(localSrv, 'GET', p);
+    /* Not a 404: a bookmark from the served version should land somewhere
+     * useful rather than looking like a broken install. */
+    check(`${p} sends a bookmark from the served version to the app`,
+      res.status === 302 && res.headers.location === '/',
+      res.status + ' -> ' + res.headers.location);
+  }
+
+  for (const p of ['/assets/js/app.js', '/assets/js/auth.js', '/assets/css/app.css']) {
+    const res = await req(localSrv, 'GET', p);
+    check(`${p} is served without any authentication`,
+      res.status === 200 && res.text.length > 100,
+      res.status + ' ' + res.text.length + ' bytes');
+  }
+
+  const localState = await req(localSrv, 'GET', '/api/auth/state');
+  const ls = localState.json || {};
+  check('/api/auth/state answers mode "local", already signed in',
+    localState.status === 200 && ls.mode === 'local' && ls.signedIn === true &&
+    ls.hasAccounts === true && ls.user && ls.user.name === 'Local' &&
+    ls.user.role === 'user',
+    JSON.stringify(ls).slice(0, 170));
+  /* 0 means "no timeout", and it is only ever sent here. A client that quoted
+   * five minutes and then never followed through would teach people to ignore
+   * the next warning that mattered. */
+  check('and reports no clocks at all — idleMs 0, maxAgeMs 0',
+    ls.idleMs === 0 && ls.maxAgeMs === 0,
+    `idleMs=${ls.idleMs} maxAgeMs=${ls.maxAgeMs}`);
+
+  const localTouch = await req(localSrv, 'POST', '/api/auth/touch', { json: {} });
+  check('touch is a no-op rather than a refusal, so an older client costs nothing',
+    localTouch.status === 200 && (localTouch.json || {}).idleFor === 0 &&
+    (localTouch.json || {}).expiresInMs === 0,
+    localTouch.status + ' ' + JSON.stringify(localTouch.json));
+
+  /* Every account route, refused specifically. Not 404 — "no such endpoint"
+   * sends somebody looking for a typo — and emphatically not a silent success:
+   * pretending to add a user who cannot exist is worse than saying no. */
+  const accountRoutes = [
+    ['POST', '/api/auth/signin', { name: 'Local', password: 'a-good-passphrase' }],
+    ['POST', '/api/auth/signout', {}],
+    ['POST', '/api/auth/setup', { token: 'X', name: 'A', password: 'a-good-passphrase' }],
+    ['POST', '/api/auth/password', { current: 'aaaaaaaa', next: 'bbbbbbbb' }],
+    ['GET', '/api/users', null],
+    ['POST', '/api/users', { name: 'Someone', password: 'a-good-passphrase' }],
+    ['DELETE', '/api/users/Someone', {}]
+  ];
+  for (const [method, p, body] of accountRoutes) {
+    const res = await req(localSrv, method, p,
+      body === null ? {} : { json: body });
+    check(`${method} ${p} is refused 403 LOCAL_MODE`,
+      res.status === 403 && (res.json || {}).code === 'LOCAL_MODE' &&
+      /desktop version/i.test((res.json || {}).error || ''),
+      res.status + ' ' + JSON.stringify(res.json).slice(0, 90));
+  }
+
+  /* Local mode must not touch the accounts file at all — no accounts.json, no
+   * setup-token.txt, nothing left behind on somebody's laptop. KEYS_DATA was
+   * left unset above precisely so the default location can be checked. */
+  const defaultDataDir = path.join(ROOT, 'server', 'data');
+  check('server/data is never created — local mode has no accounts to store',
+    fs.existsSync(defaultDataDir) === false, defaultDataDir);
+
+  /* DNS rebinding: a hostile page can point a name it controls at 127.0.0.1
+   * and become same-origin with an unauthenticated server. The Host header is
+   * what gives that away. */
+  const spoofedHost = await req(localSrv, 'GET', '/',
+    { headers: { Host: 'evil.example' } });
+  check('a request with a spoofed Host header is refused',
+    spoofedHost.status === 400, String(spoofedHost.status));
+  const namedHost = await req(localSrv, 'GET', '/',
+    { headers: { Host: 'localhost:' + localSrv.port } });
+  check('while the launcher\'s own names still work',
+    namedHost.status === 200, String(namedHost.status));
+
+  /* --- the desktop copy in a real browser -------------------------------- */
+  const localCtx = await browser.newContext({ viewport: { width: 1400, height: 950 } });
+  /* Installed before any page script runs. The heartbeat is the one thing that
+   * has to be proven ABSENT, and the only honest way to do that is to watch
+   * for the timer it would need and the request it would send. */
+  await localCtx.addInitScript(() => {
+    window.__intervals = [];
+    const realInterval = window.setInterval;
+    window.setInterval = function (fn, ms) {
+      window.__intervals.push(Number(ms));
+      return realInterval.apply(this, arguments);
+    };
+    window.__fetches = [];
+    const realFetch = window.fetch;
+    window.fetch = function () {
+      window.__fetches.push(String(arguments[0]));
+      return realFetch.apply(this, arguments);
+    };
+  });
+  const localPage = await localCtx.newPage();
+  const localErrors = [];
+  localPage.on('pageerror', e => localErrors.push('pageerror: ' + e.message));
+  localPage.on('console', m => { if (m.type() === 'error') localErrors.push('console: ' + m.text()); });
+
+  await localPage.goto(localSrv.base + '/', { waitUntil: 'domcontentloaded' });
+  await localPage.waitForFunction(
+    () => document.querySelectorAll('#page-stage .paper').length > 0,
+    null, { timeout: 20000 }).catch(() => {});
+  await localPage.waitForTimeout(900);
+
+  const localBoot = await localPage.evaluate(() => ({
+    papers: document.querySelectorAll('#page-stage .paper').length,
+    fields: document.querySelectorAll('#editor-scroll .rt').length,
+    gateHidden: (document.getElementById('auth-gate') || {}).hidden,
+    locked: document.body.classList.contains('is-locked'),
+    relocked: document.body.classList.contains('is-relocked'),
+    inert: document.getElementById('app').hasAttribute('inert'),
+    mode: window.Keys.Auth.mode,
+    idleMs: window.Keys.Auth.IDLE_MS,
+    me: window.Keys.Auth.currentUser()
+  }));
+
+  check('the desktop copy opens straight into the editor',
+    localBoot.papers === 4 && localBoot.fields > 0,
+    `papers=${localBoot.papers} fields=${localBoot.fields}`);
+  check('there is no gate, and nothing is locked or inert',
+    localBoot.gateHidden === true && localBoot.locked === false &&
+    localBoot.relocked === false && localBoot.inert === false,
+    JSON.stringify(localBoot));
+  /* AUTH-API §0: the client still sees http://, so its own mode is unchanged.
+   * Local mode is a property of the server, and nothing about the client's
+   * mode detection moves. */
+  check('the client still calls this served mode — local mode is the server\'s business',
+    localBoot.mode === 'served', String(localBoot.mode));
+  check('nothing claims a timeout that cannot fire',
+    localBoot.idleMs === 0, 'IDLE_MS=' + localBoot.idleMs);
+
+  /* --- the honesty requirements ------------------------------------------ */
+  const localSettings = await localPage.evaluate(async () => {
+    window.Keys.Auth.openSettings();
+    await new Promise(r => setTimeout(r, 400));
+    const vis = el => !!(el && !el.hidden && el.offsetParent !== null);
+    const txt = el => ((el && el.textContent) || '').replace(/\s+/g, ' ').trim();
+    const out = {
+      open: document.getElementById('settings-dialog').open,
+      noteShown: vis(document.getElementById('settings-offline')),
+      note: txt(document.getElementById('settings-offline')),
+      signout: vis(document.getElementById('settings-signout')),
+      password: vis(document.getElementById('settings-password-section')),
+      account: vis(document.getElementById('settings-account-section')),
+      people: vis(document.getElementById('settings-people')),
+      rosterNodes: document.querySelectorAll('#settings-user-list *').length,
+      removeButtons: document.querySelectorAll('[data-auth="remove"]').length,
+      who: txt(document.getElementById('settings-who'))
+    };
+    window.Keys.Auth.closeSettings();
+    return out;
+  });
+
+  check('Settings explains that this is the desktop copy',
+    localSettings.open === true && localSettings.noteShown === true &&
+    /desktop copy/i.test(localSettings.note),
+    localSettings.note.slice(0, 120));
+  /* The offline copy's sentence would be a lie here. There IS a server — it is
+   * what is serving the page — and the safety comes from where it listens, so
+   * that is the promise to state. */
+  check('the note does not claim "there is no server", because there is one',
+    !/there is no server/i.test(localSettings.note),
+    localSettings.note.slice(0, 120));
+  check('it says the server is unreachable from other machines, and names 127.0.0.1',
+    /127\.0\.0\.1/.test(localSettings.note) &&
+    /not reachable/i.test(localSettings.note),
+    localSettings.note.slice(0, 160));
+  check('no sign-out button — there is nobody to sign out',
+    localSettings.signout === false);
+  check('no change-password form, and no people to add or remove',
+    localSettings.password === false && localSettings.account === false &&
+    localSettings.people === false,
+    JSON.stringify({ pw: localSettings.password, acct: localSettings.account,
+                     people: localSettings.people }));
+  /* Hidden is not enough. A roster built from a placeholder user and then
+   * hidden is markup describing accounts that do not exist, one CSS mistake
+   * away from being on screen. */
+  check('no roster markup is built at all',
+    localSettings.rosterNodes === 0 && localSettings.removeButtons === 0,
+    `nodes=${localSettings.rosterNodes} remove=${localSettings.removeButtons}`);
+  /* The server answers with a placeholder user called "Local" so the client
+   * boots. Repeating that name back as though it were an account holder would
+   * send somebody looking for an account that cannot exist. */
+  check('it does not name a phantom account holder',
+    /this computer only/i.test(localSettings.who) &&
+    !/\bLocal\b/.test(localSettings.who), localSettings.who);
+
+  /* --- editing, which is the whole point of the thing -------------------- */
+  const localEdit = await localPage.evaluate(async () => {
+    const el = document.querySelector('#editor-scroll .rt[data-path="masthead.motto"]');
+    if (!el) return { err: 'no editor field' };
+    el.focus();
+    el.innerHTML = 'THE DESKTOP COPY EDITS';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 1200));
+    el.blur();
+    return {
+      onPage: (document.querySelector(
+        '#page-stage [data-bind="masthead.motto"]') || {}).textContent,
+      autosaved: /THE DESKTOP COPY EDITS/.test(
+        localStorage.getItem('stpeters.keys.autosave.v2') || '')
+    };
+  });
+  check('typing reaches the preview',
+    localEdit.onPage === 'THE DESKTOP COPY EDITS', String(localEdit.onPage));
+  check('and is autosaved to this origin\'s storage',
+    localEdit.autosaved === true, JSON.stringify(localEdit));
+
+  /* --- no heartbeat ------------------------------------------------------- */
+  const beat = await localPage.evaluate(async () => {
+    const before = window.__fetches.length;
+    /* Activity is the only thing that justifies a touch, so provoke some. In
+     * local mode nothing is even listening for it. */
+    for (let i = 0; i < 5; i++) {
+      document.dispatchEvent(new Event('mousemove', { bubbles: true }));
+      document.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'a' }));
+      await new Promise(r => setTimeout(r, 300));
+    }
+    return {
+      intervals: window.__intervals.slice(),
+      after: window.__fetches.slice(before)
+    };
+  });
+  /* Nothing can expire, so a request a minute forever would be pure waste —
+   * and a warning that "you will be signed out in about 30 seconds" would be
+   * simply false in a copy with no sign-in. */
+  check('no idle heartbeat timer is ever started',
+    beat.intervals.indexOf(30000) === -1, 'intervals: ' + beat.intervals.join(', '));
+  check('and activity provokes no touch, because there is no session to keep',
+    beat.after.every(u => !/\/api\/auth\/touch/.test(u)),
+    beat.after.join(', ') || 'no requests at all');
+
+  const localDiag = await localPage.evaluate(() => window.Keys.Auth.diagnose());
+  check('diagnose() identifies the desktop copy',
+    /desktop copy/i.test(localDiag.summary || '') &&
+    /KEYS_LOCAL=1/.test(localDiag.summary || ''),
+    String(localDiag.summary).slice(0, 130));
+  check('diagnose() quotes no timeout, rather than the client default',
+    localDiag.idleTimeoutMinutes === 0,
+    'minutes=' + localDiag.idleTimeoutMinutes);
+  check('diagnose() reports the server\'s mode',
+    localDiag.serverMode === 'local', String(localDiag.serverMode));
+
+  check('no console or page errors anywhere in the desktop copy',
+    localErrors.length === 0, localErrors.slice(0, 4).join(' | '));
+
+  /* Asked again at the end: a stray write during the browser session would be
+   * as bad as one at startup, and this is where it would show up. */
+  check('and still no server/data after a whole session in the desktop copy',
+    fs.existsSync(defaultDataDir) === false, defaultDataDir);
+
+  await localCtx.close();
+  await localSrv.stop();
 
   /* ---------------------------------------------------------------- shots--
    * Screenshots and the PDF must show a PRISTINE document. The tests above

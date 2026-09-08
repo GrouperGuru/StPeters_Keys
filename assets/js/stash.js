@@ -11,8 +11,9 @@
  * drawer has to outlive the document it was filled from. Kept in `doc`, every
  * Load would overwrite the library with whatever that file happened to
  * contain, and starting next week's issue would empty it. So it lives in its
- * own localStorage key, alongside the theme and the accounts: per browser, not
- * per newsletter.
+ * own localStorage key, alongside the theme and the autosaved working copy:
+ * per browser, not per newsletter. (Accounts used to be in this list. They are
+ * not any more — they live on the server, which is the whole point of them.)
  *
  * The trade-off is real and worth stating: e-mailing someone the .json does
  * NOT send them your saved boxes.

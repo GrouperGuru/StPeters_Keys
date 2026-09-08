@@ -2,22 +2,64 @@
 
 A web-based newsletter generator for St. Peter's Lutheran School.
 
-There is no build step, no install and no dependencies. There are **two ways to
-run it**, and they behave differently on purpose:
+There is no build step and there are no packages to install — no `npm install`,
+no `node_modules`, no lockfile. Node.js itself is the only thing any of this
+needs, and the desktop launcher will install that for you if it's missing.
 
-- **Served** — `node server/server.js`, then open the address it prints.
-  Accounts live on the server, and the sign-in is a real lock: nothing reaches
-  a browser without a valid session. This is the one to use for a shared
-  office machine, a VM, or anybody who is not you.
-- **Offline** — open `index.html` straight from a folder. No server, therefore
-  no accounts and no sign-in at all. This is the one to use on your own laptop.
+There are **three ways to run it**, and they behave differently on purpose:
+
+| | How you start it | Accounts | Who can reach it |
+|---|---|---|---|
+| **Desktop** | double-click `desktop/StPeters-Keys.command` (Mac) or `.bat` (Windows) | none | this computer only |
+| **Shared server** | `node server/server.js` | yes, on the server | anyone you give an address and a password to |
+| **Straight from disk** | open `index.html` in a browser | none | anyone with the files |
+
+- **Desktop** is for one person on their own machine. It starts a small server
+  on `127.0.0.1`, so nothing else on the network can see it, and there is
+  nothing to sign in to. See [`desktop/README.md`](desktop/README.md).
+- **Shared server** is for a school office, a VM, or anybody who is not you.
+  The sign-in is a real lock: nothing reaches a browser without a valid
+  session.
+- **Straight from disk** needs nothing at all, not even Node — but the browser
+  is stricter about local files, and Safari in particular can refuse to keep
+  the automatic backup. Prefer **Desktop** if you have the choice.
 
 Everything else — the editor, the templates, the drawer, the PDF export — is
-identical in both.
+identical in all three.
 
-## Running the server
+## The desktop version
 
-Node 24 or later, nothing to install:
+Double-click the launcher for your system:
+
+| | |
+|---|---|
+| **macOS** | `desktop/StPeters-Keys.command` |
+| **Windows** | `desktop/StPeters-Keys.bat` |
+
+A small console window opens and the newsletter appears in your usual browser.
+Leave that window alone while you work; closing it stops the newsletter.
+
+It needs **Node.js 20 or newer**, and that is the only thing it needs. If it
+isn't already on the machine the launcher explains what Node is, asks whether
+to install it, and — if you say yes — installs it for you: Homebrew or the
+official installer on a Mac, `winget` or the official installer on Windows.
+Say no and it falls back to opening `index.html` directly, so you can still
+work; it tells you what you give up by doing that.
+
+There are **no accounts, no sign-in and no timeout** in this version. What
+makes that safe is one rule in the server: with `KEYS_LOCAL=1` it listens on
+`127.0.0.1` and **refuses to start** on any other address. No environment
+variable relaxes that. Switching authentication off while listening on the
+network would hand the newsletter, and a working editor for it, to every
+machine on the wifi — and from the machine that started it, it would look
+exactly like a working desktop app.
+
+[`desktop/README.md`](desktop/README.md) covers this for a non-technical
+reader, including what the security warnings on first launch mean.
+
+## The shared server
+
+Node 20 or later, nothing to install:
 
 ```sh
 node server/server.js
@@ -71,6 +113,8 @@ Environment variables, all of them optional:
 | `KEYS_IDLE_MS` | `300000` | Idle timeout, in milliseconds |
 | `KEYS_TLS_CERT`, `KEYS_TLS_KEY` | — | If **both** are set, the server speaks HTTPS |
 | `KEYS_TRUST_PROXY` | `0` | Trust `X-Forwarded-For`/`-Proto` from a reverse proxy |
+| `KEYS_LOCAL` | unset | Desktop mode: no accounts, `127.0.0.1` only. See above |
+| `KEYS_LOCAL_IDLE_MS` | `3600000` | Desktop mode only: quit after this long with no requests; `0` never quits |
 
 Two things are deliberately not configurable: a session expires after 12 hours
 however busy you have been, and passwords are always PBKDF2-HMAC-SHA256 at
@@ -116,6 +160,30 @@ a password.
 
 There is no browser equivalent, and there can't be: a page cannot wipe a
 server's accounts.
+
+### "This is not the St. Peter's Keys server"
+
+If the app puts up a panel saying that, it means **the page was served by
+something other than `server/server.js`**. The page and the editor arrive
+normally, but nothing answers about accounts — so nobody can sign in, and the
+administrator cannot add or remove anybody.
+
+The usual causes:
+
+- an editor's live-preview extension (VS Code's Live Server and friends),
+- `python -m http.server`, `npx serve`, or any other plain file server,
+- nginx or Apache pointed straight at this folder,
+- the real server having stopped, with something else now on its port.
+
+All of them hand over the files and then answer `404` to every `/api/...`
+request. The fix is to serve the folder with its own server — `node
+server/server.js`, then use the address **it** prints — or, if you don't need
+accounts, use the desktop launcher or open `index.html` directly.
+
+This used to fail much less helpfully: the app booted all the way into the
+editor and then reported "the server sent a reply this app could not read
+(HTTP 404)" the first time anybody touched an account. It now refuses to start
+and says why.
 
 ### More
 
@@ -163,8 +231,8 @@ it, already saved, and signing in puts you straight back where you were with
 nothing reloaded and nothing retyped. A session also ends 12 hours after you
 signed in, however busy you have been.
 
-Opened from disk, none of the above applies: there is nobody to sign in as and
-the app simply opens.
+In the desktop version and when opened from disk, none of the above applies:
+there is nobody to sign in as, nothing to time out, and the app simply opens.
 
 > ### What this protects, and what it doesn't
 >
@@ -184,13 +252,20 @@ the app simply opens.
 > not encrypted where it is stored, either: it lives in the browser's storage
 > and in whatever `.json` files people have saved.
 >
+> **The desktop version has no sign-in, and does not need one.** Its
+> protection is not a password but an address: with `KEYS_LOCAL=1` the server
+> listens on `127.0.0.1` and refuses to start anywhere else, so no other
+> machine can reach it at all. Anyone who can use that computer can read and
+> edit the newsletter — which is the same as saying anyone who can use your
+> computer can read your documents.
+>
 > **Opened straight from disk over `file://` there is no gate at all**, and
 > that is a decision rather than an oversight. There is no server to
 > authenticate against, and a sign-in box that anyone could delete by editing
 > one file protects nothing from somebody who already has the files. Anyone who
 > can open the folder can read the newsletter.
 >
-> **Either way, please don't keep anything confidential in the newsletter.**
+> **In every case, please don't keep anything confidential in the newsletter.**
 
 ## Using it
 
@@ -397,6 +472,10 @@ server/login.html       the sign-in page, served at /login
 server/setup.html       the first-run page, served at /setup
 server/reset-accounts.js  the way back in when the admin password is lost
 server/README.md        running and deploying the server
+desktop/launch.js       starts the server in local mode and opens the browser
+desktop/StPeters-Keys.command   double-click launcher, macOS
+desktop/StPeters-Keys.bat       double-click launcher, Windows
+desktop/README.md       the desktop version, for a non-technical reader
 docs/SPEC.md            module contract — read before changing anything
 docs/CLASSES.md         CSS class contract for the paper
 docs/AUTH-API.md        the server ↔ browser contract for accounts

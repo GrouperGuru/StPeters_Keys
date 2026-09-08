@@ -291,14 +291,23 @@
     <h1 class="auth-title" id="auth-title">Sign in to St. Peter&rsquo;s Keys</h1>
     <p class="auth-lead" id="auth-lead"></p>
 
-    <!-- Why you are looking at this: an idle timeout, or a server with no
-         accounts yet. Informational, not an error. -->
+    <!-- Why you are looking at this: an idle timeout, a server with no
+         accounts yet, or — the loud one — this page being served by something
+         that is not the St. Peter's Keys server, in which case auth.js adds
+         .auth-note--alarm and this paragraph carries the whole diagnosis and
+         both ways out of it. Informational by default, a fault when it says
+         so. -->
     <p class="auth-note" id="auth-note" hidden></p>
 
     <!-- Sign-in only. There is no "create the first account" branch here any
          more: the server owns first-run setup at /setup, gated by a one-time
          token, so the administrator account cannot be claimed by whoever
-         reaches the machine first on a shared network. -->
+         reaches the machine first on a shared network.
+
+         auth.js HIDES this form outright when there is no API behind it. A
+         sign-in box in front of a plain file server would take a real password,
+         send it somewhere that has never heard of /api/auth/signin, and report
+         a failure that reads as "you typed it wrong". -->
     <form id="auth-form" novalidate>
       <div class="auth-field">
         <label class="auth-label" for="auth-name">Name</label>
@@ -317,6 +326,16 @@
       <button type="submit" class="tb-btn tb-btn--primary auth-submit"
               id="auth-submit">Sign in</button>
     </form>
+
+    <!-- The way out of the two panels that have no sign-in form: "there is no
+         API here" and "the server has stopped answering". Without it the panel
+         would be a cell rather than a diagnosis — someone who starts the real
+         server in the next terminal needs a control that lets them straight
+         in, and a reload is a worse answer because whatever is answering the
+         port might not return this page at all. Sits OUTSIDE #auth-form so it
+         cannot submit it. -->
+    <button type="button" class="tb-btn tb-btn--primary auth-submit"
+            id="auth-retry" hidden>Try again</button>
 
     <p class="auth-notice"></p>
   </div>

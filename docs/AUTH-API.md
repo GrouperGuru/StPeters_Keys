@@ -8,7 +8,7 @@ if something here is wrong, fix **this file first**, then both sides.
 
 ## 0. The shape of the thing
 
-The app now has two modes, decided by `location.protocol`:
+The app now has two client-side modes, decided by `location.protocol`:
 
 | Mode | How you got there | Accounts | Gate |
 |---|---|---|---|
@@ -23,6 +23,42 @@ barrier" notice comes down in served mode.
 **Offline mode is not, and does not pretend to be.** Opened straight from disk
 there is no server to authenticate against, and a local gate would protect
 nothing from someone who already has the files. The app just opens.
+
+### The third thing: local mode (the desktop app)
+
+There is a third arrangement, and it is a property of the **server**, not of the
+client: `KEYS_LOCAL=1`, used by `desktop/launch.js`. The client still sees
+`http://`, so `Keys.Auth.mode` is `'served'` and nothing about the client's mode
+detection changes. What changes is the answer to `GET /api/auth/state`, which
+reports `mode: "local"` and `signedIn: true`.
+
+| | served | **local** | offline |
+|---|---|---|---|
+| Client's `location.protocol` | `http`/`https` | `http` | `file` |
+| `Keys.Auth.mode` | `served` | `served` | `offline` |
+| `state.mode` | `"served"` | `"local"` | *no server to ask* |
+| Authentication | sessions, cookies, gate | **none at all** | none possible |
+| Listen address | `KEYS_HOST`, default `0.0.0.0` | **always `127.0.0.1`** | — |
+| Accounts, `server/data` | yes | **never touched** | — |
+
+**Local mode has no authentication whatsoever** — no gate, no accounts, no
+sessions, no setup token — because it is one person on their own machine, and
+they already have the files. What makes that safe is a single interlock in
+`server/server.js`, and it is worth stating in this contract because it is the
+one rule the whole arrangement rests on:
+
+> In local mode the listen address is `127.0.0.1`, and the server **refuses to
+> start** if `KEYS_HOST` is set to anything else. There is no environment
+> variable that relaxes this. "No authentication" plus `0.0.0.0` would publish
+> the newsletter, and a working editor for it, to every machine on the network,
+> and would look — from the machine that started it — exactly like a working
+> desktop app.
+
+The client is expected to treat local mode as **already signed in**: that is
+what `signedIn: true` plus a `user` object means, and no new client code path is
+required to make the app work. `mode: "local"` exists so the UI can be honest
+about which of the three it is (and so it can leave the idle machinery alone —
+see the note on `idleMs` in §4), not so it can decide whether to boot.
 
 ---
 
@@ -100,7 +136,13 @@ All responses are `application/json`. All errors share one shape:
 
 Codes: `NO_SESSION`, `IDLE`, `EXPIRED`, `BAD_CREDENTIALS`, `RATE_LIMITED`,
 `NOT_ADMIN`, `LAST_ADMIN`, `NAME_TAKEN`, `NO_SUCH_USER`, `WEAK_PASSWORD`,
-`BAD_NAME`, `BAD_TOKEN`, `SETUP_DONE`, `CSRF`, `BAD_JSON`.
+`BAD_NAME`, `BAD_TOKEN`, `SETUP_DONE`, `CSRF`, `BAD_JSON`, `LOCAL_MODE`.
+
+`LOCAL_MODE` is **only** returned in local mode, and only by the account
+endpoints — `signin`, `signout`, `setup`, `password`, `/api/users*` — with
+status `403`. It means "this request is about accounts, and this copy has none";
+see §0 and the table in §4a. Nothing in served mode ever returns it, so a client
+may treat it as "hide the account controls" without further checks.
 
 A "user" object, everywhere it appears, is exactly:
 
@@ -138,6 +180,60 @@ authenticated work) extends a session.
 The client's boot check. `secure` is whether the connection is TLS; the client
 shows a plain-http warning in Settings when it is `false` and the host is not
 localhost.
+
+In **local mode** the same route answers, without auth as always:
+
+```json
+{
+  "mode": "local",
+  "signedIn": true,
+  "user": { "name": "Local", "role": "user",
+            "createdAt": 1757260000000, "lastSignInAt": 1757260000000 },
+  "hasAccounts": true,
+  "idleMs": 0,
+  "maxAgeMs": 0,
+  "secure": false,
+  "serverTime": 1757263000000
+}
+```
+
+Field by field, because each value is a decision:
+
+- **`signedIn: true` and a `user`** — the app must boot, and this is the answer
+  it already knows how to act on. Making local mode look like "signed in
+  already" was preferred over inventing a state the client has to learn.
+- **`hasAccounts: true`** — a `false` here sends the client down the "no
+  administrator yet, go to /setup" path, and there is no `/setup` in local mode.
+- **`role: "user"`, name `"Local"`** — not an account, and not an administrator:
+  an administrator manages *other people's* accounts and there are none. `admin`
+  would make the client fetch and draw a roster that cannot exist.
+- **`idleMs: 0`, `maxAgeMs: 0`** — `0` means **no timeout**, which is new and is
+  only ever sent in local mode. There is no session, so nothing expires. The
+  client already ignores a non-positive `idleMs` (it keeps its own default),
+  so an unmodified client still works; what it should not do is *quote* its
+  default at the user, or run the idle warning, when `mode === "local"`.
+- **`secure: false`** — accurate: it is plain `http`. Loopback traffic does not
+  reach a network card, and the client already exempts localhost from its
+  plain-http warning.
+
+### §4a. The other routes in local mode
+
+| Route | Local mode |
+|---|---|
+| `GET /api/auth/state` | `200`, as above |
+| `POST /api/auth/touch` | `200 { "idleFor": 0, "expiresInMs": 0, "user": {...} }` — a no-op, so an older client's heartbeat costs nothing |
+| `POST /api/auth/signin`, `/signout`, `/setup`, `/password` | `403 LOCAL_MODE` |
+| `GET`/`POST /api/users`, `DELETE /api/users/:name` | `403 LOCAL_MODE` |
+| anything else under `/api/` | `404` |
+| `GET /` | `200` `index.html` — no gate, no redirect |
+| `GET /login`, `GET /setup` | `302 /` |
+| `GET /assets/**` | `200`, same allowlist and traversal checks as served mode |
+| any `Host` header that is not `127.0.0.1`, `localhost` or `::1` | `400` (DNS-rebinding refusal) |
+
+The CSRF rule in §2 still applies to every non-`GET` request in local mode.
+Local mode's own handlers never call `authenticate()`, never read
+`accounts.json` and never create a session; served mode's code is not reached
+at all.
 
 ### `POST /api/auth/setup` — first run only
 
@@ -239,12 +335,19 @@ a fresh setup token. It never touches newsletter content.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `KEYS_PORT` | `8749` | Listen port |
-| `KEYS_HOST` | `0.0.0.0` | Listen address |
-| `KEYS_DATA` | `<repo>/server/data` | Where `accounts.json` lives |
-| `KEYS_IDLE_MS` | `300000` | Idle timeout |
-| `KEYS_TLS_CERT`, `KEYS_TLS_KEY` | — | If both set, serve HTTPS |
+| `KEYS_PORT` | `8749` | Listen port. In local mode, the *first* port tried: it walks upward if busy |
+| `KEYS_HOST` | `0.0.0.0` | Listen address. In local mode: forced to `127.0.0.1`, and any other value **refuses to start** |
+| `KEYS_DATA` | `<repo>/server/data` | Where `accounts.json` lives. Unused in local mode |
+| `KEYS_IDLE_MS` | `300000` | Idle timeout. Unused in local mode — there are no sessions |
+| `KEYS_TLS_CERT`, `KEYS_TLS_KEY` | — | If both set, serve HTTPS. Ignored (with a warning) in local mode |
 | `KEYS_TRUST_PROXY` | `0` | Trust `X-Forwarded-For` for rate-limit keys |
+| `KEYS_LOCAL` | `0` | **Desktop mode**: no authentication, `127.0.0.1` only. See §0 |
+| `KEYS_LOCAL_IDLE_MS` | `3600000` | Local mode only: stop after this long with no requests at all. `0` never stops. Not part of the interlock |
+
+`KEYS_LOCAL=1` is set by `desktop/launch.js`; nothing else should set it. The
+desktop launchers default the port to **8750** rather than 8749 so that trying
+the desktop copy on a machine that also serves the real one does not fight over
+a socket.
 
 ---
 
@@ -261,9 +364,42 @@ sign-in clears the counter for that pair.
 - `Keys.Auth.start(boot)` keeps its existing signature.
 - **Offline mode** (`file:`): call `boot()` immediately. No gate. Settings shows
   an "opened from disk, accounts live on the server" note instead of a roster.
-- **Served mode**: the server already refused to send this page to a stranger,
-  so on load we are signed in. Fetch `/api/auth/state` for identity, then
-  `boot()`.
+- **Served mode**: fetch `/api/auth/state` for identity, then `boot()`.
+
+  **Served mode must be proven, not assumed — this is a fixed bug, not a
+  preference.** The client cannot conclude "the server refused to send this page
+  to a stranger, therefore I am signed in" from the URL scheme. Any plain file
+  server will hand over `index.html` and every asset and then answer nothing
+  about accounts: `python -m http.server`, an editor's live-preview extension,
+  `npx serve`, nginx pointed at the folder, or this server having died with
+  something else on its port. The symptom reported from the field was an
+  administrator who could not add users and a sign out that failed with
+  "HTTP 404" — one cause, two faces.
+
+  So `start()` requires `GET /api/auth/state` to return 2xx **and** JSON with
+  `mode` (string), `signedIn` and `hasAccounts` (booleans) before anyone is let
+  in. Failing that, the app puts the `#auth-gate` up as a blocking panel naming
+  the cause, how to get accounts back (`node server/server.js`) and how to carry
+  on without them (open `index.html` from the folder), and **does not boot**.
+  Booting into an editor whose Save works and whose every account action 404s is
+  the bug; failing closed with no way forward would be a different one.
+
+  **The classifier is response *shape*, not status code.** Every JSON error this
+  server sends carries a `code` from §4 — so an error body with no `code` did
+  not come from it. That one rule catches a 404 with an HTML body, a proxy's 502
+  page, python's 501 on POST, and a 200 of unrelated JSON, while leaving genuine
+  refusals (`401 BAD_CREDENTIALS`, `409 NAME_TAKEN`, `403 NOT_ADMIN`) to show
+  the server's own sentence. Client-side code `NO_API`, a sibling of `OFFLINE`.
+
+  **"Absent" and "unreachable" are different, and conflating them loses work.**
+  A rejected `fetch` (no status, no body) is transient: retried, never a panel,
+  never an eviction. A code-less reply is positive evidence and is not retried —
+  a static server's 404 is the same 404 next time. Mid-session it takes two
+  consecutive absent verdicts before a panel covers a running editor, since one
+  odd reply can be a proxy hiccup. Autosave before raising the gate, but **only
+  once booted**: autosaving pre-boot would write the empty starting document
+  over the autosave that has not been read back yet, turning a misconfiguration
+  into real data loss.
 - **Idle expiry must not lose work.** When `touch` returns 401, put the existing
   in-page `#auth-gate` up and re-authenticate *in place* via
   `POST /api/auth/signin` — do **not** navigate to `/login`. The editor is still
@@ -271,6 +407,14 @@ sign-in clears the counter for that pair.
   on without a reload.
 - All account management in Settings goes through the API above.
 - `Keys.Auth.diagnose()` stays, and reports the server's view.
+- **Local mode** (`state.mode === "local"`, `Keys.Auth.mode` still `'served'`):
+  boot exactly as served mode does — `signedIn: true` is the whole instruction.
+  Beyond that, three things are true and the UI is free to act on them: the
+  account controls answer `403 LOCAL_MODE`, so there is nothing to show; there
+  is no idle clock (`idleMs: 0`), so the "you will be signed out in about 30
+  seconds" warning and the served notice's "closes the session after N minutes"
+  sentence are both false here; and there is no gate to raise, because a `touch`
+  can never return `401`.
 
 Public surface (unchanged names where behaviour survives):
 `start, currentUser, isAdmin, users, signIn, signOut, addUser, removeUser,

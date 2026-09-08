@@ -29,6 +29,26 @@
  * and server/README.md explains how to put a certificate in front of it. What
  * this server refuses to do is pretend the problem away.
  *
+ * -----------------------------------------------------------------------------
+ * LOCAL MODE (KEYS_LOCAL=1) — the desktop app
+ *
+ * There is a second way to run this: as a single-person desktop application,
+ * started by desktop/StPeters-Keys.command or desktop/StPeters-Keys.bat, which
+ * run desktop/launch.js, which runs this file with KEYS_LOCAL=1. In that mode
+ * there is no authentication at all — no gate, no accounts, no sessions, no
+ * setup token — because there is nobody to authenticate: the person who
+ * double-clicked the launcher already has the files.
+ *
+ * THE INTERLOCK. Local mode ALWAYS binds 127.0.0.1, and REFUSES TO START if
+ * KEYS_HOST asks for anything else. This is not a preference and there is no
+ * environment variable that relaxes it. "No authentication" and "listening on
+ * 0.0.0.0" together would publish the parish newsletter — and a working editor
+ * for it — to every machine on the network, with no sign that anything is
+ * wrong. Bind to loopback, or do not run. See LOCAL/HOST below and the
+ * assertion in main(); if you are about to change either, read the comment
+ * there first.
+ * -----------------------------------------------------------------------------
+ *
  * It has NO dependencies, deliberately, and must keep having none. Only
  * node:http, node:https, node:crypto, node:fs, node:path and node:url. This
  * project has been dependency-free since the first commit; a parish will run it
@@ -82,8 +102,92 @@ function envFlag(name) {
   return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
 }
 
+/* =============================================================================
+ * LOCAL MODE AND THE LOOPBACK INTERLOCK
+ * -----------------------------------------------------------------------------
+ * KEYS_LOCAL=1 turns authentication off entirely (see handleLocalApi and the
+ * local branch of handleStatic). The interlock below is what makes that safe,
+ * and it is the single most dangerous line in this repository to get wrong.
+ *
+ * Read it as one rule: IN LOCAL MODE THE LISTEN ADDRESS IS 127.0.0.1, FULL
+ * STOP. HOST is not computed from the environment in local mode; KEYS_HOST is
+ * only inspected in order to REFUSE, loudly, if somebody set it to something
+ * else. An unauthenticated server on 0.0.0.0 hands the newsletter and its
+ * editor to everyone on the network and looks, from the machine that started
+ * it, exactly like a working desktop app — the failure is total and silent.
+ *
+ * "127.0.0.1" is the only accepted spelling. Not "localhost" (a name, which
+ * resolves through whatever /etc/hosts says today), not "::1", not the empty
+ * string plus a comment. An allowlist of near-synonyms is how this check would
+ * eventually acquire an entry that is not loopback at all — and nobody has a
+ * reason to set KEYS_HOST for a desktop app in the first place.
+ *
+ * The refusal is recorded here and acted on as the first statement of main(),
+ * rather than exiting at require-time, so that importing this module for its
+ * exports cannot kill the importing process.
+ * ========================================================================== */
+const LOCAL = envFlag('KEYS_LOCAL');
+const LOOPBACK = '127.0.0.1';
+
+const HOST_REQUESTED = process.env.KEYS_HOST || '';
+
+const HOST_REFUSAL = (LOCAL && HOST_REQUESTED && HOST_REQUESTED !== LOOPBACK)
+  ? 'KEYS_LOCAL=1 turns authentication off, so this server may only listen ' +
+    'on ' + LOOPBACK + ' — but KEYS_HOST="' + HOST_REQUESTED + '" asks for ' +
+    'another address. Refusing to start: an unauthenticated server on any ' +
+    'other address would hand the newsletter, and the editor for it, to ' +
+    'every machine on the network. Unset KEYS_HOST (or set it to exactly ' +
+    LOOPBACK + ') for the desktop app, or unset KEYS_LOCAL to run the real ' +
+    'server with accounts.'
+  : null;
+
 const PORT = envInt('KEYS_PORT', 8749, 1, 65535);
-const HOST = process.env.KEYS_HOST || '0.0.0.0';
+const HOST = LOCAL ? LOOPBACK : (HOST_REQUESTED || '0.0.0.0');
+
+/* Local mode walks upward from PORT rather than dying on EADDRINUSE: the
+ * person who double-clicked the launcher cannot be asked to pick a free port,
+ * and something else on their machine may well already own the default. The
+ * port that was actually used is printed, and handed to the launcher on the
+ * READY line, so the browser is opened at the right address. */
+const LOCAL_PORT_TRIES = 20;
+
+/* When does a desktop app stop? Not when a tab closes — a browser cannot be
+ * asked, and treating an accidental ⌘W as "quit" would end the session someone
+ * was in the middle of. So: local mode exits after a long stretch in which it
+ * served NO requests at all. An open tab polls GET /api/auth/state on its
+ * heartbeat, so "no requests for an hour" means the browser really is gone (or
+ * the machine was asleep, in which case the person is not working either).
+ *
+ * An hour is deliberately far longer than any plausible pause. The cost of
+ * being wrong is small and recoverable — the app is already loaded in the tab
+ * and autosaves to that origin's localStorage, so nothing is lost; a reload
+ * would fail until the launcher is double-clicked again, which desktop/README
+ * says. The cost of the other mistake — never exiting — is a stray server left
+ * listening for days after somebody thought they had finished.
+ *
+ * KEYS_LOCAL_IDLE_MS=0 disables the timer for anyone who wants it to stay up.
+ * This is a convenience knob and NOT part of the interlock above. */
+const LOCAL_IDLE_EXIT_MS = envInt('KEYS_LOCAL_IDLE_MS', 60 * 60 * 1000,
+  0, 24 * 60 * 60 * 1000);
+
+/* Who local mode says you are. Not an account — there are no accounts in local
+ * mode — but /api/auth/state has to answer with something, and the client is
+ * built to be told either "signed in as somebody" or "here is a gate". This is
+ * the former: docs/AUTH-API.md §0 and §4.
+ *
+ * role is "user", not "admin", on purpose. An administrator in this app is
+ * someone who manages OTHER PEOPLE'S accounts, and in local mode there are
+ * none — no roster to read, nobody to add, nobody to remove. Claiming "admin"
+ * would make the client fetch and draw a roster of accounts that do not exist.
+ * "user" makes it ask for the least, and every account-management route
+ * answers LOCAL_MODE anyway. */
+const LOCAL_USER = Object.freeze({
+  name: 'Local',
+  role: 'user',
+  createdAt: Date.now(),
+  lastSignInAt: Date.now()
+});
+
 const DATA_DIR = process.env.KEYS_DATA
   ? path.resolve(process.env.KEYS_DATA)
   : path.join(__dirname, 'data');
@@ -97,7 +201,14 @@ const MAX_AGE_MS = Sessions.DEFAULT_MAX_AGE_MS;
 
 const TLS_CERT = process.env.KEYS_TLS_CERT || '';
 const TLS_KEY = process.env.KEYS_TLS_KEY || '';
-const TLS_ON = !!(TLS_CERT && TLS_KEY);
+
+/* Local mode is plain http, always. Nothing crosses a network — the packets do
+ * not leave the machine — and a certificate would only give the launcher an
+ * https URL to open, a warning page to click through, and one more thing to
+ * expire. Stray TLS variables in a desktop user's environment are ignored
+ * rather than obeyed, with a word so the ignoring is not a mystery. */
+const TLS_ON = !LOCAL && !!(TLS_CERT && TLS_KEY);
+const TLS_IGNORED = LOCAL && !!(TLS_CERT || TLS_KEY);
 
 const TRUST_PROXY = envFlag('KEYS_TRUST_PROXY');
 
@@ -634,6 +745,140 @@ function unauthenticated(res, code) {
 }
 
 /* =============================================================================
+ * LOCAL MODE — THE WHOLE OF IT
+ * -----------------------------------------------------------------------------
+ * Everything local mode serves is in these two functions, and handle() routes
+ * to them before it reaches anything else. That is the point of writing it this
+ * way rather than sprinkling `if (LOCAL)` through the real handlers: it is
+ * checkable by reading. authenticate(), accounts, sessions and the rate limiter
+ * are NOT REACHABLE in local mode — not gated, not bypassed, not called at all
+ * — so there is no path by which a half-initialised account store or a null
+ * session could be handed to code that expects a real one.
+ *
+ * What a hostile page in another tab can do to this server, since "no
+ * authentication on a listening socket" deserves the question asked out loud:
+ *
+ *   - frame it: no. frame-ancestors 'none' and X-Frame-Options: DENY.
+ *   - read a response with fetch(): no. There is no CORS header anywhere in
+ *     this file, so the browser refuses to show it the body.
+ *   - read the newsletter out of localStorage: no. That belongs to the
+ *     http://127.0.0.1:<port> origin and the same-origin policy applies.
+ *   - reach it from another machine: no. See the interlock.
+ *   - point a hostname it controls at 127.0.0.1 to become same-origin (DNS
+ *     rebinding): no — hence the Host check in handle().
+ * ========================================================================== */
+
+/** Is the Host header one of this machine's own names for itself?
+ *
+ *  DNS rebinding is the one attack the loopback binding does not by itself
+ *  answer: a hostile site resolves evil.example to 127.0.0.1, and the browser
+ *  then treats http://evil.example:<port> as a different origin from ours but
+ *  the same server — which is how a page nobody trusts gets to make requests
+ *  that look same-origin. Refusing any Host but our own closes it. */
+function localHostOk(hostHeader) {
+  const host = String(hostHeader || '').trim().toLowerCase();
+  if (!host) return false;
+  /* Strip the port — it is whatever port we ended up on, and comparing it adds
+   * nothing: the request already arrived on our socket. */
+  const name = host.startsWith('[')
+    ? host.slice(0, host.indexOf(']') + 1)      // [::1]:8750
+    : host.split(':')[0];
+  return name === '127.0.0.1' || name === 'localhost' ||
+         name === '[::1]' || name === '::1';
+}
+
+/** The local-mode JSON API. Two routes answer; every other /api/ path is
+ *  refused with one sentence that says why. */
+function handleLocalApi(req, res, ctx) {
+  const p = ctx.path;
+  const method = req.method;
+
+  /* --- GET /api/auth/state ---------------------------------------------------
+   * docs/AUTH-API.md §4. This is the route the client decides its whole
+   * behaviour from, so local mode answers it as "signed in already" rather than
+   * inventing a state the client has to learn about: signedIn true, a user
+   * object of the documented shape, hasAccounts true so nothing sends anybody
+   * to /setup.
+   *
+   * mode is "local" so the UI can be honest about which of the three things
+   * this is, and idleMs/maxAgeMs are 0 — the documented "no timeout" — because
+   * there is no session to expire. A client that has not learned about "local"
+   * yet still works: it reads signedIn and boots. */
+  if (p === '/api/auth/state' && (method === 'GET' || method === 'HEAD')) {
+    return sendJson(res, 200, {
+      mode: 'local',
+      signedIn: true,
+      user: LOCAL_USER,
+      hasAccounts: true,
+      idleMs: 0,
+      maxAgeMs: 0,
+      /* Not TLS, and not a lie by omission either: loopback traffic never
+       * reaches a network card, and the client already exempts localhost from
+       * its plain-http warning. */
+      secure: false,
+      serverTime: Date.now()
+    });
+  }
+
+  /* --- POST /api/auth/touch -------------------------------------------------
+   * The client's heartbeat. Answered rather than refused so an older client's
+   * once-a-minute touch is a no-op instead of a 403 it has to interpret. Both
+   * clocks read 0, matching idleMs/maxAgeMs above: nothing is counting down. */
+  if (p === '/api/auth/touch' && method === 'POST') {
+    return sendJson(res, 200, {
+      idleFor: 0,
+      expiresInMs: 0,
+      user: LOCAL_USER
+    });
+  }
+
+  /* Sign-in, sign-out, setup, password changes, the roster. All of it is
+   * account management, and local mode has no accounts to manage. A specific
+   * refusal, not a 404: "there is no such endpoint" would send somebody looking
+   * for a typo, and not a silent success either — pretending to add a user who
+   * cannot exist is worse than saying no. */
+  const ACCOUNT_ROUTES = ['/api/auth/signin', '/api/auth/signout',
+    '/api/auth/setup', '/api/auth/password', '/api/users'];
+  if (ACCOUNT_ROUTES.indexOf(p) !== -1 || p.startsWith('/api/users/')) {
+    return apiError(res, 403, 'LOCAL_MODE',
+      'This is the desktop version: it runs on your own computer with no ' +
+      'accounts and no sign-in, so there is nothing to sign in or out of and ' +
+      'nobody to add or remove. Accounts belong to the shared server version ' +
+      '(see server/README.md).');
+  }
+
+  return notFound(res);
+}
+
+/** The local-mode static routes. The gate is not bypassed here; there is no
+ *  gate. /login and /setup redirect to the app rather than 404, because a
+ *  bookmark from the served version should land somewhere useful. */
+async function handleLocalStatic(req, res, ctx) {
+  const p = ctx.path;
+  const method = req.method;
+
+  if (method !== 'GET' && method !== 'HEAD') return notFound(res);
+
+  if (p === '/') {
+    return sendFile(req, res, INDEX_FILE, MIME['.html'], 'no-store');
+  }
+
+  if (p === '/login' || p === '/setup') return redirect(res, '/');
+
+  if (p.startsWith('/assets/')) {
+    /* Still the same allowlist, the same traversal checks and the same
+     * realpath assertion as served mode — resolveAsset() is the one that
+     * keeps this from being a general web server, and it has nothing to do
+     * with authentication. */
+    const found = await resolveAsset(p);
+    if (!found) return notFound(res);
+    return sendFile(req, res, found.file, found.type, 'private, no-cache');
+  }
+
+  return notFound(res);
+}
+
+/* =============================================================================
  * THE JSON API — docs/AUTH-API.md §4
  * ========================================================================== */
 async function handleApi(req, res, ctx) {
@@ -988,9 +1233,24 @@ async function handleStatic(req, res, ctx) {
 /* =============================================================================
  * THE HANDLER
  * ========================================================================== */
+/* Last time any request arrived. Only local mode reads it — see
+ * LOCAL_IDLE_EXIT_MS — and it is updated for every request, including the ones
+ * that get refused, because a refused request still proves a browser is there. */
+let lastRequestAt = Date.now();
+
 async function handle(req, res) {
+  lastRequestAt = Date.now();
+
   const secure = isSecure(req);
   applySecurityHeaders(res, secure);
+
+  /* Local mode: our own name, or nothing. See localHostOk(). */
+  if (LOCAL && !localHostOk(req.headers.host)) {
+    console.warn('[keys] refused request with Host "' +
+      String(req.headers.host || '') + '" — local mode answers only to ' +
+      '127.0.0.1 and localhost.');
+    return sendText(res, 400, 'Bad request.');
+  }
 
   const parsed = parsePath(req.url);
   if (!parsed.ok) {
@@ -1035,9 +1295,16 @@ async function handle(req, res) {
     })()
   };
 
-  if (ctx.path === '/api' || ctx.path.startsWith('/api/')) {
-    return handleApi(req, res, ctx);
+  const isApi = (ctx.path === '/api' || ctx.path.startsWith('/api/'));
+
+  /* The fork. Local mode's handlers never call authenticate(), never read
+   * accounts and never create a session; served mode's are untouched by local
+   * mode existing. */
+  if (LOCAL) {
+    return isApi ? handleLocalApi(req, res, ctx) : handleLocalStatic(req, res, ctx);
   }
+
+  if (isApi) return handleApi(req, res, ctx);
   return handleStatic(req, res, ctx);
 }
 
@@ -1081,8 +1348,29 @@ function banner(lines) {
   console.log('');
 }
 
+/* The marker desktop/launch.js waits for on stdout. It is printed once, only in
+ * local mode, and only after listen() has succeeded, so the launcher opens the
+ * browser at the port the server really got rather than the one it asked for.
+ * If you rename this, rename it in desktop/launch.js too. */
+const LOCAL_READY_PREFIX = '[keys] KEYS-LOCAL-READY ';
+
 async function main() {
-  await accounts.load();
+  /* ===========================================================================
+   * THE INTERLOCK, ACTED ON BEFORE ANYTHING ELSE.
+   *
+   * First statement of the program's real work, on purpose: nothing is loaded,
+   * no socket is opened and no file is written before this refusal has had its
+   * chance. Read the long comment beside HOST_REFUSAL before touching it.
+   * ======================================================================== */
+  if (HOST_REFUSAL) {
+    console.error('[keys] ' + HOST_REFUSAL);
+    process.exit(1);
+  }
+
+  /* Local mode has no accounts, so it does not read, create or write the data
+   * directory at all — no accounts.json, no setup-token.txt, nothing to leave
+   * behind on somebody's laptop. */
+  if (!LOCAL) await accounts.load();
 
   /* Resolve the assets root once, with symlinks followed, so the containment
    * check in resolveAsset() compares like with like. */
@@ -1094,29 +1382,90 @@ async function main() {
     process.exit(1);
   }
 
-  const token = await accounts.ensureSetupToken();
+  const token = LOCAL ? null : await accounts.ensureSetupToken();
+
+  if (TLS_IGNORED) {
+    console.warn('[keys] KEYS_TLS_CERT/KEY are set but local mode is plain ' +
+      'http on 127.0.0.1; ignoring them.');
+  }
 
   const server = createServer();
 
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error('[keys] port ' + PORT + ' is already in use. Set ' +
-        'KEYS_PORT to something else, or stop the other server.');
-    } else if (err.code === 'EACCES') {
-      console.error('[keys] not allowed to listen on port ' + PORT + '. ' +
-        'Ports below 1024 need extra privileges — use a high port and put a ' +
-        'reverse proxy in front (see server/README.md).');
-    } else {
-      console.error('[keys] server error:', err.message);
-    }
+  /* The same rule again, one line above the call that would break it. HOST is a
+   * const computed from LOCAL, so this cannot fire — which is why it is cheap
+   * to keep. It exists so that anyone who later makes HOST mutable, or moves
+   * the computation, is stopped here instead of shipping an unauthenticated
+   * server on 0.0.0.0. */
+  if (LOCAL && HOST !== LOOPBACK) {
+    console.error('[keys] refusing to listen: local mode must bind ' +
+      LOOPBACK + ', not "' + HOST + '". This is a bug in server.js.');
     process.exit(1);
-  });
+  }
 
-  server.listen(PORT, HOST, () => {
+  let listenPort = PORT;
+
+  if (LOCAL) {
+    /* Walk upward. Nobody double-clicking a launcher can be asked to free a
+     * port, and the launcher is told which one we landed on. */
+    let tried = 1;
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE' && tried < LOCAL_PORT_TRIES &&
+          listenPort < 65535) {
+        tried++;
+        console.log('[keys] port ' + listenPort + ' is busy; trying ' +
+          (listenPort + 1) + '.');
+        listenPort += 1;
+        server.listen(listenPort, HOST);
+        return;
+      }
+      if (err.code === 'EADDRINUSE') {
+        console.error('[keys] ports ' + PORT + '-' + listenPort + ' are all ' +
+          'in use. Close whatever is using them, or set KEYS_PORT to a free ' +
+          'one and try again.');
+      } else {
+        console.error('[keys] server error:', err.message);
+      }
+      process.exit(1);
+    });
+  } else {
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error('[keys] port ' + PORT + ' is already in use. Set ' +
+          'KEYS_PORT to something else, or stop the other server.');
+      } else if (err.code === 'EACCES') {
+        console.error('[keys] not allowed to listen on port ' + PORT + '. ' +
+          'Ports below 1024 need extra privileges — use a high port and put a ' +
+          'reverse proxy in front (see server/README.md).');
+      } else {
+        console.error('[keys] server error:', err.message);
+      }
+      process.exit(1);
+    });
+  }
+
+  server.on('listening', () => {
+    const addr = server.address();
+    if (addr && typeof addr === 'object' && addr.port) listenPort = addr.port;
+
     const scheme = TLS_ON ? 'https' : 'http';
     const shown = (HOST === '0.0.0.0' || HOST === '::') ? 'localhost' : HOST;
+
+    if (LOCAL) {
+      const url = 'http://' + LOOPBACK + ':' + listenPort + '/';
+      console.log('[keys] St. Peter’s Keys — desktop (local) mode.');
+      console.log('[keys]   ' + url);
+      console.log('[keys]   address    ' + LOOPBACK + ' only — this server is ' +
+        'not reachable from the network');
+      console.log('[keys]   accounts   none: authentication is OFF in local mode');
+      console.log('[keys]   idle exit  ' + (LOCAL_IDLE_EXIT_MS
+        ? Math.round(LOCAL_IDLE_EXIT_MS / 60000) + ' minutes with no requests'
+        : 'never (KEYS_LOCAL_IDLE_MS=0)'));
+      console.log(LOCAL_READY_PREFIX + url);
+      return;
+    }
+
     console.log('[keys] St. Peter’s Keys is being served.');
-    console.log('[keys]   ' + scheme + '://' + shown + ':' + PORT + '/');
+    console.log('[keys]   ' + scheme + '://' + shown + ':' + listenPort + '/');
     console.log('[keys]   data       ' + DATA_DIR);
     console.log('[keys]   accounts   ' + accounts.count);
     console.log('[keys]   idle       ' + Math.round(IDLE_MS / 1000) + 's');
@@ -1140,13 +1489,15 @@ async function main() {
        * appears in a log line from this process. */
       banner([
         'FIRST-RUN SETUP',
-        'Open   ' + scheme + '://' + shown + ':' + PORT + '/setup',
+        'Open   ' + scheme + '://' + shown + ':' + listenPort + '/setup',
         'Token  ' + token,
         '',
         'Also saved to ' + path.join(DATA_DIR, 'setup-token.txt')
       ]);
     }
   });
+
+  server.listen(listenPort, HOST);
 
   /* --- graceful shutdown --------------------------------------------------
    * Stop listening, let the requests that are already in flight finish, flush
@@ -1156,14 +1507,17 @@ async function main() {
    * ---------------------------------------------------------------------- */
   let shuttingDown = false;
 
-  const shutdown = (signal) => {
+  /* `why` is a signal name for the two signal handlers, and a short phrase for
+   * local mode's inactivity timer, which is the one caller that is not a
+   * signal. It is only ever printed. */
+  const shutdown = (why) => {
     if (shuttingDown) {
       /* A second Ctrl-C means "I meant it". */
-      console.warn('[keys] ' + signal + ' again — exiting now.');
+      console.warn('[keys] ' + why + ' again — exiting now.');
       process.exit(1);
     }
     shuttingDown = true;
-    console.log('[keys] ' + signal + ' received; finishing open requests.');
+    console.log('[keys] stopping (' + why + '); finishing open requests.');
 
     sessions.stop();
     limiter.stop();
@@ -1193,6 +1547,35 @@ async function main() {
 
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  /* SIGHUP is what a closed Terminal window or console sends to everything in
+   * its process group, and it is the desktop app's ordinary way of being told
+   * to stop. Node's default for SIGHUP is to die anyway; handling it means the
+   * accounts flush and the "stopped." line still happen, and it costs served
+   * mode nothing. */
+  process.on('SIGHUP', () => shutdown('SIGHUP'));
+
+  /* --- local mode: stop after a long silence ------------------------------
+   * See LOCAL_IDLE_EXIT_MS for why this is measured in requests-not-arriving
+   * rather than in tabs-closing, and why the number is an hour. */
+  if (LOCAL && LOCAL_IDLE_EXIT_MS > 0) {
+    const CHECK_MS = Math.min(60000, LOCAL_IDLE_EXIT_MS);
+    const watcher = setInterval(() => {
+      if (shuttingDown) return;
+      const quietFor = Date.now() - lastRequestAt;
+      if (quietFor < LOCAL_IDLE_EXIT_MS) return;
+      console.log('[keys] nothing has asked for anything in ' +
+        Math.round(quietFor / 60000) + ' minutes, so the browser has ' +
+        'evidently gone. Stopping — double-click the launcher again when ' +
+        'you next want it.');
+      clearInterval(watcher);
+      shutdown('no activity');
+    }, CHECK_MS);
+    /* NOT unref'd: this timer is the only thing that will ever end an
+     * otherwise-idle desktop server, and an unref'd one would let the process
+     * exit... which is the same outcome, but by luck rather than on purpose.
+     * Keeping the reference means the reason for stopping is always printed. */
+  }
 }
 
 if (require.main === module) {

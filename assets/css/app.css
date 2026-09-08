@@ -3848,9 +3848,28 @@ body.is-relocked { overflow: hidden; }
   line-height: 1.45;
 }
 
+/* The same paragraph, in its other voice. An idle timeout in red reads as a
+ * fault, which is why .auth-note is calm — but "this page is being served by
+ * something that is not the St. Peter's Keys server" IS a fault, it is the
+ * only text on that panel, and it has to be read rather than skimmed. Warning
+ * rather than danger on purpose: nothing is broken and nothing is lost, the
+ * app is simply pointed at the wrong program. */
+.auth-note--alarm {
+  border-color: var(--warn-border);
+  background: var(--warn-bg);
+  color: var(--warn-strong);
+  text-align: left;
+}
+
 .auth-note[hidden] { display: none; }
 
 #auth-form[hidden] { display: none; }
+
+/* Shares .auth-submit's sizing. It DOES need its own [hidden] rule: .tb-btn
+ * sets `display: inline-flex`, which beats the user-agent's `[hidden] {
+ * display: none }` on specificity, so `hidden` alone would leave a "Try again"
+ * button sitting under the normal sign-in form. */
+#auth-retry[hidden] { display: none; }
 
 .auth-submit {
   width: 100%;
