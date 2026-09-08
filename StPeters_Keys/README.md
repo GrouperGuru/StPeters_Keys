@@ -104,6 +104,13 @@ request reaches a backend that is shutting down. If the app fails to start,
 nginx is deliberately left alone: a proxy with nothing behind it hides the real
 error.
 
+`alpine-start.sh` also **writes the nginx site config** if it isn't already
+there, so a deployment script that clones the repo and runs it needs no manual
+nginx step. It's idempotent — an already-correct config is left alone, an
+out-of-date one is rewritten and backed up, and a config the script didn't
+write is never overwritten without `--force-conf`. `--check-conf` prints what
+it would write and changes nothing.
+
 Both need root, and take `--skip-nginx` if you only want the app.
 They're `#!/bin/sh` rather than `#!/bin/bash` on purpose: Alpine has no bash in
 the base image, and a bash shebang there fails with "not found" — which reads
@@ -251,6 +258,16 @@ All of them hand over the files and then answer `404` to every `/api/...`
 request. The fix is to serve the folder with its own server — `node
 server/server.js`, then use the address **it** prints — or, if you don't need
 accounts, use the desktop launcher or open `index.html` directly.
+
+**If you are deliberately running nginx or Apache in front**, that is fine and
+supported — but it has to *proxy* to the server rather than serve the folder
+itself: a `location /` with `proxy_pass`, and no `root`, `index` or `try_files`
+for this site. Two headers have to be right as well, and one of them fails in a
+way that looks unrelated: leave `Host` at nginx's default and sign-in returns
+**403 `CSRF`** while the rest of the site behaves normally. The reverse-proxy
+section of [`server/README.md`](server/README.md) has a config that works,
+including the case where something further out — Caddy, a Cloudflare tunnel —
+is the thing holding the certificate.
 
 **To find out which of them it is**, on the machine holding the files:
 
