@@ -62,12 +62,64 @@ reader, including what the security warnings on first launch mean.
 Node 20 or later, nothing to install:
 
 ```sh
-node server/server.js
+node server/start.js        # start it
+node server/stop.js         # stop it
 ```
 
-It prints the address it is listening on, and on a fresh machine a **setup
-token**. Open the address, paste the token, create the administrator account.
-That is the entire installation.
+`node server/server.js` still works and is what actually runs; the two scripts
+above just wrap it with the bits you want when starting it by hand:
+
+- **`start.js`** repeats the first-run **setup token** as the *last* thing on
+  screen, after the startup lines and the TLS warning — which is otherwise
+  exactly where it scrolls out of view. It prints every address the server can
+  be reached at rather than only `localhost`, so browsing from another machine
+  doesn't involve guesswork. And it refuses to start a second copy on a port
+  that already answers instead of leaving an `EADDRINUSE` trace to interpret.
+  On every run after the first there is no token to catch, so it just starts
+  the server. `--background` detaches it and logs to a file.
+- **`stop.js`** stops every copy of **this** project's server, including ones
+  started by hand without `start.js`. `--dry-run` lists them and stops nothing.
+
+On **Alpine** (including an LXC container), `apk add nodejs` is all the setup
+there is — Node 20 or newer ships from Alpine 3.19. Both scripts work there
+unchanged and need neither `ps` nor `lsof`: on Linux they read `/proc`
+directly, because BusyBox's `ps` doesn't accept the flags the alternative would
+have required. Alpine uses **OpenRC rather than systemd**, so see the OpenRC
+service file in [`server/README.md`](server/README.md) — and note that
+`stop.js` has to be run *inside* the container, since PIDs differ from the
+host's.
+
+There are also two shell wrappers that bring the app and its **nginx** proxy up
+and down together:
+
+```sh
+./server/alpine-start.sh     # start the server, then nginx
+./server/alpine-stop.sh      # stop nginx, then the server
+```
+
+The orders are opposite on purpose. nginx is the proxy in front, so on the way
+up the app must exist before nginx forwards to it — otherwise that window is
+served as 502s — and on the way down the front door closes first, so no
+request reaches a backend that is shutting down. If the app fails to start,
+nginx is deliberately left alone: a proxy with nothing behind it hides the real
+error.
+
+Both need root, and take `--skip-nginx` if you only want the app.
+They're `#!/bin/sh` rather than `#!/bin/bash` on purpose: Alpine has no bash in
+the base image, and a bash shebang there fails with "not found" — which reads
+as though the script is missing rather than the shell.
+
+`stop.js` is careful about what it signals, on purpose. A process qualifies
+only if it is a Node binary running *this* checkout's `server/server.js`,
+compared as a resolved absolute path. So a second copy of the project on the
+same machine is left running, and nginx, Apache, `python -m http.server` and an
+editor's live preview are never touched — even when one of them is the reason
+the app is misbehaving. Stopping somebody's web server isn't this script's
+business; `whats-serving.js` will tell you if one is in the way.
+
+However you start it, the server prints the address it is listening on, and on
+a fresh machine a **setup token**. Open the address, paste the token, create
+the administrator account. That is the entire installation.
 
 ### First run: the setup token
 
@@ -83,6 +135,26 @@ an account exists:
   Token  4KJ2-9WQX-7ATB-1MZP
 ────────────────────────────────────────────────────────
 ```
+
+Start with `node server/start.js` and you get that again at the very end,
+after the warnings, together with every address the server answers on:
+
+```
+────────────────────────────────────────────────────────────
+  FIRST RUN — create the administrator account now
+
+  Token   4KJ2-9WQX-7ATB-1MZP
+
+  Open one of these and paste the token in:
+      http://localhost:8749/setup
+      http://192.168.1.228:8749/setup
+────────────────────────────────────────────────────────────
+```
+
+That second address is the one you want from another machine. Reaching for
+`localhost` from a different computer is a common way to end up staring at the
+"this is not the St. Peter's Keys server" panel with a perfectly good server
+running.
 
 Lost the console — started it from `systemd`, or closed the window? The same
 token is on disk:
@@ -490,6 +562,11 @@ server/sessions.js      in-memory sessions and both expiry clocks
 server/ratelimit.js     the sign-in backoff
 server/login.html       the sign-in page, served at /login
 server/setup.html       the first-run page, served at /setup
+server/start.js         starts server.js; surfaces the first-run setup token
+server/stop.js          stops server.js, including copies started by hand
+server/alpine-start.sh  Alpine: start the server, then nginx (rc-service)
+server/alpine-stop.sh   Alpine: stop nginx (rc-service), then the server
+server/instances.js     shared: which processes are ours, and only ours
 server/reset-accounts.js  the way back in when the admin password is lost
 server/whats-serving.js   "the app says this is not its server" — what is it, then?
 server/README.md        running and deploying the server

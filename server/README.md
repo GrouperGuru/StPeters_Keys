@@ -170,6 +170,130 @@ write to `accounts.json` to land, and exits. Sessions are in memory, so a
 restart signs everybody out. That is a sign-in prompt, not lost work: the
 newsletter autosaves continuously.
 
+### Alpine: the two shell scripts
+
+If you are starting and stopping this by hand — rather than as an OpenRC
+service — these bring the app and its nginx proxy up and down together:
+
+```sh
+./server/alpine-start.sh          # start the server, then nginx
+./server/alpine-stop.sh           # stop nginx, then the server
+./server/alpine-stop.sh --dry-run # show what would be stopped
+```
+
+Both need root, because `rc-service` does.
+
+**The order is deliberate and opposite in each.** nginx is the reverse proxy in
+front of the app, so:
+
+- **Starting**: app first, nginx second. A proxy started before the thing it
+  forwards to answers every request in that window with a 502, which looks to
+  whoever is holding the page like the app is broken.
+- **Stopping**: nginx first, app second. Closing the front door first means no
+  request ever reaches a backend on its way out — and with no new traffic
+  arriving, `stop.js`'s SIGTERM finds the server idle, so it can let in-flight
+  requests finish and flush a queued `accounts.json` write before exiting.
+  That wait is why an account added seconds earlier is not lost.
+
+**If the app fails to start, `alpine-start.sh` does not start nginx.** A proxy
+with nothing behind it serves 502s to the whole parish and hides the real
+error, which is on the screen in front of you.
+
+The start script is **idempotent** — run it twice and it will notice the server
+is already up and carry on to nginx, rather than refusing. That matters when
+the first run got half way.
+
+`--skip-nginx` on either script leaves nginx alone entirely, for when you are
+only interested in the app.
+
+Before starting nginx, `nginx -t` is run: a bad config otherwise fails with a
+terse init-script message, where `nginx -t` names the file and the line.
+
+Both are `#!/bin/sh`, not `#!/bin/bash`, and that is deliberate: Alpine has no
+bash in the base image, and a bash shebang fails with "not found" — which
+reads as though the *script* is missing rather than the shell. They are plain
+POSIX and behave identically under bash if you have it.
+
+They need the executable bit. Git records it, but if the files arrived by zip
+or from a Windows machine:
+
+```sh
+chmod +x server/alpine-start.sh server/alpine-stop.sh
+```
+
+### Alpine, and other OpenRC systems
+
+Alpine has no `systemd`, and no `bash` either. Nothing here needs bash — every
+script in `server/` is plain Node — but the service definition is different.
+
+```sh
+apk add nodejs                        # Node 20+ on Alpine 3.19 and later
+node --version                        # confirm it is 20 or newer
+adduser -S -D -H -s /sbin/nologin keys
+install -d -o keys -g nogroup -m 700 /var/lib/keys
+```
+
+`/etc/init.d/keys` — remember `chmod +x` on it:
+
+```sh
+#!/sbin/openrc-run
+
+name="St. Peter's Keys"
+description="Newsletter server"
+
+command="/usr/bin/node"
+command_args="/srv/keys/server/server.js"
+command_user="keys:nogroup"
+command_background=true
+directory="/srv/keys"
+pidfile="/run/keys.pid"
+output_log="/var/log/keys.log"
+error_log="/var/log/keys.log"
+
+export KEYS_HOST=127.0.0.1
+export KEYS_PORT=8749
+export KEYS_DATA=/var/lib/keys
+export KEYS_TRUST_PROXY=1
+
+depend() {
+  need net
+}
+```
+
+```sh
+rc-update add keys default
+rc-service keys start
+grep -A4 'FIRST-RUN' /var/log/keys.log     # the setup token is in here
+```
+
+`command_background=true` is what makes OpenRC write the pidfile and return,
+and it is also why the output has to be redirected to `output_log`: the setup
+token is printed to stdout, and with nowhere to go it is simply lost — leaving
+a deployment that cannot be set up and gives no clue why. If it has already
+been lost, the token is on disk too:
+
+```sh
+cat /var/lib/keys/setup-token.txt
+```
+
+**In an LXC container**, run the service inside the container as above and
+publish the port at the host. Two things catch people out:
+
+- `KEYS_HOST=127.0.0.1` binds the container's own loopback, so nothing
+  outside the container can reach it. That is correct *only* when a reverse
+  proxy runs in the same container. If your proxy is on the host, or you are
+  connecting straight from your desktop, leave `KEYS_HOST` unset so the server
+  binds all of the container's interfaces — the container boundary is doing
+  the isolating.
+- `node server/stop.js` finds processes through `/proc`, so it must run inside
+  the same container as the server. From the host it will correctly report
+  finding nothing, because from the host those PIDs are different numbers.
+
+`node server/start.js` and `node server/stop.js` work on Alpine unchanged, and
+need neither `ps` nor `lsof` — on Linux they read `/proc` directly. `ps` on
+BusyBox does not support the flags the alternative would have needed, so this
+is the one path that works everywhere.
+
 ---
 
 ## TLS

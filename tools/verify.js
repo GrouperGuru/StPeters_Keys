@@ -311,10 +311,18 @@ function startServerExpectingExit(env, timeoutMs) {
 }
 
 /** Every address one of our own processes is listening on, as the operating
- *  system sees it — `127.0.0.1:8858` or `*:8858`. null if lsof is unavailable,
- *  which is a warning rather than a failure: the check that matters is asked a
- *  second way, over TCP. */
+ *  system sees it — `127.0.0.1:8858` or `*:8858`. null if it cannot be
+ *  determined, which is a warning rather than a failure: the check that
+ *  matters is asked a second way, over TCP.
+ *
+ *  Two implementations, because the one check this feeds is the most
+ *  safety-critical in the suite — that local mode binds loopback and NOT the
+ *  wildcard — and it must not quietly stop being checked on the platform this
+ *  is actually deployed on. lsof is not in Alpine's base image, so on Linux
+ *  /proc is tried first and needs nothing installed. */
 function listeningAddresses(pid) {
+  const viaProc = listeningViaProc(pid);
+  if (viaProc) return viaProc;
   try {
     const { execFileSync } = require('child_process');
     const out = execFileSync('lsof',
@@ -326,6 +334,68 @@ function listeningAddresses(pid) {
   } catch (e) {
     return null;
   }
+}
+
+/** The same answer from /proc, for Linux hosts with no lsof.
+ *
+ *  /proc/net/tcp lists sockets for the whole network namespace, so the pid's
+ *  own socket inodes are collected first from /proc/<pid>/fd and used to pick
+ *  its rows out. Matching on port alone would be wrong: it would credit this
+ *  process with somebody else's socket on the same port, which is exactly the
+ *  confusion the test is trying to rule out. */
+function listeningViaProc(pid) {
+  if (process.platform !== 'linux') return null;
+  const fsx = require('fs');
+
+  let inodes;
+  try {
+    inodes = new Set(
+      fsx.readdirSync('/proc/' + pid + '/fd').map((fd) => {
+        try {
+          const link = fsx.readlinkSync('/proc/' + pid + '/fd/' + fd);
+          const m = link.match(/^socket:\[(\d+)\]$/);
+          return m ? m[1] : null;
+        } catch (e) { return null; }
+      }).filter(Boolean)
+    );
+  } catch (e) {
+    return null;                       // no /proc, or not our process to read
+  }
+  if (inodes.size === 0) return [];
+
+  /* IPv4 local_address is little-endian hex ("0100007F" is 127.0.0.1);
+   * IPv6 is 32 hex chars. State 0A is LISTEN. */
+  const decode4 = (hex) => hex.match(/../g).reverse()
+    .map((b) => parseInt(b, 16)).join('.');
+  const decode6 = (hex) => {
+    if (/^0{32}$/.test(hex)) return '*';
+    /* ::ffff:a.b.c.d — a v4 address on a v6 socket.
+     * /proc/net/tcp6 writes the address as FOUR 8-char words, so the mapped
+     * form is 16 zeros, then ffff, then a zero word, then the v4 address:
+     * 0000000000000000 FFFF 0000 0100007F — 32 characters, not 28. */
+    const m = hex.match(/^0{16}f{4}0{4}([0-9a-fA-F]{8})$/i);
+    if (m) return decode4(m[1]);
+    return '[v6]';
+  };
+
+  const out = [];
+  for (const [file, decode] of [['/proc/net/tcp', decode4],
+                                ['/proc/net/tcp6', decode6]]) {
+    let text;
+    try { text = fsx.readFileSync(file, 'utf8'); } catch (e) { continue; }
+    text.split('\n').slice(1).forEach((line) => {
+      const f = line.trim().split(/\s+/);
+      if (f.length < 10) return;
+      if (f[3] !== '0A') return;                       // not LISTEN
+      if (!inodes.has(f[9])) return;                   // not this process
+      const [addrHex, portHex] = f[1].split(':');
+      let addr = decode(addrHex);
+      if (addr === '0.0.0.0') addr = '*';              // match lsof's spelling
+      const entry = addr + ':' + parseInt(portHex, 16);
+      if (out.indexOf(entry) === -1) out.push(entry);
+    });
+  }
+  return out;
 }
 
 /** Can anything be connected to at host:port? Resolves 'connected', or the
