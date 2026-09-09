@@ -101,6 +101,22 @@ body {
  * -----------------------------------------------------------------------------
  * `display:none` is correct HERE (unlike on .paper — see §05): none of these
  * elements is ever measured by fit.js or flip.js.
+ *
+ * >>> #stash IS NOT OPTIONAL <<<
+ *   The save-for-later drawer is `position:absolute; right:0` with
+ *   `transform: translateX(100%)` and a 288px width (app.css §28). On screen
+ *   #preview-pane clips it (`position:relative; overflow:hidden`); in print §04
+ *   makes that pane `position:static`, so the drawer's containing block becomes
+ *   the initial one and its 288px lands entirely PAST the right page edge.
+ *   Nothing clips it there, so the printed document measures 8.5in + 288px and
+ *   every sheet comes out shifted left inside an oversized page box — the
+ *   "large right margin". Hiding it is what keeps the print area equal to the
+ *   trim size. Do not replace this with `visibility:hidden` or a transform
+ *   reset: both leave the 288px in the layout.
+ *
+ * The dialogs and the sign-in gate are here for the same reason — a print
+ * fired with one of them open (Ctrl/Cmd+P is always available) would otherwise
+ * paint it over sheet one from the top layer.
  * ========================================================================== */
 
 #toolbar,
@@ -108,8 +124,12 @@ body {
 #editor-scroll,
 #rail-resizer,
 #thumb-rail,
+#stash,
 #toasts,
 #load-input,
+#auth-gate,
+#settings-dialog,
+#name-dialog,
 .stage-empty,
 noscript {
   display: none !important;

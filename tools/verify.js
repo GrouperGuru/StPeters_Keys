@@ -5824,13 +5824,52 @@ async function main() {
     const expectedSheets = await page.evaluate(() => window.Keys.App.totalPages());
     check('the issue now has an extra sheet to export', expectedSheets === 5,
       'sheets=' + expectedSheets);
+    /* The save-for-later drawer is open on purpose: it must not reach the
+     * export either way. It is `position:absolute; right:0` + translateX(100%),
+     * and print.css turns #preview-pane static — so if the drawer is not hidden
+     * its 288px lands past the right page edge, the print document measures
+     * wider than the trim, and every sheet prints shifted inside an oversized
+     * page box (the "large right margin" bug). */
+    await page.evaluate(() => {
+      const s = document.getElementById('stash');
+      if (s) s.classList.add('is-open');
+    });
     await page.emulateMedia({ media: 'print' });
     await page.waitForTimeout(500);
+
+    const printBox = await page.evaluate(() => {
+      const el = document.documentElement;
+      const stash = document.getElementById('stash');
+      const over = [];
+      document.querySelectorAll('body *').forEach(n => {
+        const b = n.getBoundingClientRect();
+        if (b.width > 0 && b.right > el.clientWidth + 1) {
+          over.push(n.id ? '#' + n.id : n.tagName.toLowerCase());
+        }
+      });
+      return {
+        scrollW: el.scrollWidth,
+        clientW: el.clientWidth,
+        stashDisplay: stash ? getComputedStyle(stash).display : 'absent',
+        over: over.slice(0, 5)
+      };
+    });
+    check('the save-for-later drawer is not printed',
+      printBox.stashDisplay === 'none', 'display=' + printBox.stashDisplay);
+    check('nothing overflows the print area to the right',
+      printBox.scrollW <= printBox.clientW,
+      `scrollWidth=${printBox.scrollW} clientWidth=${printBox.clientW}` +
+      (printBox.over.length ? ' — past the edge: ' + printBox.over.join(', ') : ''));
+
     const pdfPath = path.join(OUT, 'keys.pdf');
     await page.pdf({ path: pdfPath, printBackground: true, preferCSSPageSize: true });
     const size = fs.statSync(pdfPath).size;
     check('PDF written', size > 5000, size + ' bytes');
     await page.emulateMedia({ media: 'screen' });
+    await page.evaluate(() => {
+      const s = document.getElementById('stash');
+      if (s) s.classList.remove('is-open');
+    });
 
     // Verify the exported sheet geometry with poppler: 4 pages, the first
     // three portrait letter and the last landscape letter.
@@ -5864,6 +5903,10 @@ async function main() {
       const missing = markers.filter(m => !txt.toUpperCase().includes(m.toUpperCase()));
       check('PDF text contains the expected content markers',
         missing.length === 0, 'missing: ' + missing.join(', '));
+
+      // ...and none of the drawer's, even though it was left open above.
+      check('PDF text carries no save-for-later drawer copy',
+        !/saved for later|the drawer is empty/i.test(txt));
     } catch (e) {
       warn('poppler PDF inspection skipped', e.message.split('\n')[0]);
     }
