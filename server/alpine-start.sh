@@ -7,6 +7,9 @@
 #    ./server/alpine-start.sh --skip-nginx    start only the app server
 #    ./server/alpine-start.sh --check-conf    show what the config would be
 #    ./server/alpine-start.sh --force-conf    overwrite a config we did not write
+#    ./server/alpine-start.sh --take-default-server
+#                                             rename any other site holding
+#                                             default_server on port 80
 #    ./server/alpine-start.sh --help
 #
 #  Run as root: rc-service and /etc/nginx both need it.
@@ -50,13 +53,15 @@ ROOT=$(cd "$SELF_DIR/.." && pwd)
 SKIP_NGINX=0
 FORCE_CONF=0
 CHECK_CONF=0
+TAKE_DEFAULT=0
 for arg in "$@"; do
   case "$arg" in
     --skip-nginx|--no-nginx|--keep-nginx) SKIP_NGINX=1 ;;
     --force-conf|--force-nginx-conf)      FORCE_CONF=1 ;;
     --check-conf|--print-conf)            CHECK_CONF=1 ;;
+    --take-default-server)                TAKE_DEFAULT=1 ;;
     -h|--help)
-      sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -183,11 +188,56 @@ other_default_servers() {
   done
 }
 
-# Is this Alpine's stock placeholder site? Its whole content is a server block
-# pointing at the packaged "welcome" htdocs, so displacing it costs nothing.
-# Anything else is somebody's real site and is not ours to disable.
-is_stock_default() {
-  grep -q '/var/www/localhost/htdocs' "$1" 2>/dev/null
+# Does this file use an nginx directive anywhere?
+#
+# Deliberately NOT anchored to the start of a line. `location / { proxy_pass
+# http://...; }` on one line is entirely ordinary nginx, and an anchored match
+# would miss it — which here would mean reading somebody's live proxied site as
+# an empty placeholder and renaming it. A commented-out directive counts as a
+# match, which errs towards leaving the file alone: the safe direction.
+mentions() {
+  grep -qE "(^|[^A-Za-z0-9_])$2[[:space:]]" "$1" 2>/dev/null
+}
+
+# Is this file safe to displace — a placeholder, or a previous attempt at
+# serving THIS app — rather than somebody's real site?
+#
+# The question is asked about what the file DOES, not what it is called. An
+# earlier version of this matched one hardcoded path (/var/www/localhost/htdocs)
+# and so failed to recognise stock Alpine, whose current default.conf answers
+# `return 404` for everything and mentions no directory at all. Refusing to
+# touch the packaged placeholder is not caution, it is a broken deployment for
+# no benefit.
+#
+# Erring towards refusal is still right: renaming a live site is far worse than
+# stopping and asking. Anything not recognised here needs --take-default-server
+# or KEYS_SERVER_NAME.
+looks_like_placeholder() {
+  f=$1
+
+  # Anything that proxies somewhere is doing real work. Not ours to move.
+  mentions "$f" proxy_pass && return 1
+
+  # Older stock (Alpine, Debian): the packaged "welcome" page.
+  grep -q '/var/www/localhost/htdocs' "$f" 2>/dev/null && return 0
+
+  # Current Alpine stock: every location just returns 404, and no directory is
+  # served at all.
+  if grep -qE '(^|[^A-Za-z0-9_])return[[:space:]][[:space:]]*404' "$f" 2>/dev/null \
+     && ! mentions "$f" root && ! mentions "$f" alias; then
+    return 0
+  fi
+
+  # A previous attempt to serve THIS checkout as plain files — precisely the
+  # misconfiguration that produces "This is not the St. Peter's Keys server",
+  # and exactly what this script exists to replace. Matched with grep -F
+  # because a checkout path may contain regex metacharacters.
+  if { mentions "$f" root || mentions "$f" alias; } \
+     && grep -qF "$ROOT" "$f" 2>/dev/null; then
+    return 0
+  fi
+
+  return 1
 }
 
 # Where nginx keeps its pid file, according to nginx itself.
@@ -273,8 +323,8 @@ ensure_nginx_conf() {
 
   if [ -n "$conflicts" ]; then
     for f in $conflicts; do
-      if is_stock_default "$f"; then
-        say "  Disabling Alpine's placeholder site: $f"
+      if looks_like_placeholder "$f" || [ "$TAKE_DEFAULT" -eq 1 ]; then
+        say "  Disabling $f"
         say "    (it claims default_server on port 80, and two of those stop"
         say "     nginx from starting at all. Renamed, not deleted.)"
         mv "$f" "$f.disabled-by-keys" \
@@ -286,13 +336,26 @@ ensure_nginx_conf() {
         say "        This site will match on \"$SERVER_NAME\" instead."
         listen_line='listen 80;'
       else
-        die "$f already claims default_server on port 80, and it is not
-       Alpine's placeholder, so it is not this script's to disable.
-       Set KEYS_SERVER_NAME to the hostname this app answers on, e.g.
+        # Show it. Being told a file is in the way without being told what is
+        # in it leaves the reader to go and look before they can decide, and
+        # in a deploy log they cannot go and look at all.
+        say ""
+        say "  $f claims default_server on port 80, and it does not look like"
+        say "  a placeholder, so it is not this script's to disable. It says:"
+        say ""
+        sed -n '1,25p' "$f" 2>/dev/null | sed 's/^/      /'
+        say ""
+        die "nothing has been changed. Two ways forward:
+
+       If that is a real site, give this app its own hostname —
+       it will then match on the name and leave that site alone:
 
            KEYS_SERVER_NAME=keys.example.org $0
 
-       and this site will match on that name instead of competing."
+       If it is stale, or is the thing serving this folder as plain
+       files, have it renamed to .disabled-by-keys:
+
+           $0 --take-default-server"
       fi
     done
   fi

@@ -211,13 +211,19 @@ What it will and will not do to a box:
   file carries a `managed-by:` marker on line 1; without that marker the file
   is treated as yours. `--force-conf` overrides, after taking a backup. Delete
   the marker line and the script will leave that file alone from then on.
-- **Alpine's stock `default.conf`** — renamed to `.disabled-by-keys`. It claims
+- **A placeholder `default.conf`** — renamed to `.disabled-by-keys`. It claims
   `default_server` on port 80, and two of those is not a warning but a hard
-  nginx startup failure. It is renamed, never deleted.
-- **Somebody else's real site holding `default_server`** — left alone. Set
-  `KEYS_SERVER_NAME` and this site matches on the hostname instead; an exact
-  `server_name` wins over a `default_server` anyway. Without it the script
-  stops and explains, rather than guessing which site should own the box.
+  nginx startup failure. It is renamed, never deleted. "Placeholder" is judged
+  by what the file *does*, not its name: Alpine's current stock config answers
+  `return 404` for everything and names no directory at all, older ones point
+  at the packaged `htdocs`, and a config serving *this checkout* as plain files
+  is the very misconfiguration being replaced. All three are displaced.
+- **Somebody else's real site holding `default_server`** — left alone, and the
+  script prints the file so you can see what it is rather than going to look.
+  Two ways on: set `KEYS_SERVER_NAME` and this site matches on the hostname
+  instead (an exact `server_name` beats a `default_server` anyway), or pass
+  `--take-default-server` to have the other file renamed. Without one of those
+  it stops rather than guessing which site should own the box.
 - **A config that fails `nginx -t`** — rolled back to exactly what was there
   before. Writing a config that stops nginx starting is worse than writing
   nothing.
