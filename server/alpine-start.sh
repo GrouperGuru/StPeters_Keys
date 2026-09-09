@@ -304,6 +304,48 @@ nginx_test() {
   nginx -t >/dev/null 2>&1
 }
 
+# Will nginx actually READ the file we are about to write, and is there a
+# competing site hiding in the main config?
+#
+# Both of these are silent failures, which is why they are worth a check of
+# their own. Writing a perfect config into a directory nginx does not include
+# produces a script that reports success and changes nothing observable —
+# the worst possible outcome, because it sends you looking somewhere else.
+#
+# The second case matters especially when the checkout lives in nginx's default
+# document root (/var/www/html and friends): a `server {}` block sitting
+# directly in nginx.conf will serve the app as plain files, and nothing in
+# http.d/ can override it.
+warn_about_main_conf() {
+  [ -r "$NGINX_MAIN_CONF" ] || return 0
+  incdir=$(dirname "$NGINX_CONF")
+
+  # Is our directory included? Matched loosely on the directory name, because
+  # the glob may be written *.conf, */*.conf or with quotes.
+  if ! grep -qE '^[[:space:]]*include[^;]*'"$(basename "$incdir")"'/' "$NGINX_MAIN_CONF" 2>/dev/null; then
+    say ""
+    say "  WARNING: $NGINX_MAIN_CONF does not appear to include $incdir/"
+    say "  Nothing written there will have any effect. Add this inside its"
+    say "  http { } block, then run this script again:"
+    say "        include $incdir/*.conf;"
+    say ""
+  fi
+
+  # A server block in the main config cannot be displaced from http.d/.
+  if grep -qE '^[[:space:]]*server[[:space:]]*\{' "$NGINX_MAIN_CONF" 2>/dev/null; then
+    say ""
+    say "  WARNING: $NGINX_MAIN_CONF contains a server { } block of its own."
+    if grep -qF "$ROOT" "$NGINX_MAIN_CONF" 2>/dev/null; then
+      say "  It mentions $ROOT — so it is very likely THE thing serving this"
+      say "  folder as plain files, and it is the reason the app says it is"
+      say "  not its own server."
+    fi
+    say "  A site defined there cannot be overridden from $incdir/."
+    say "  Move it out, or comment it out, and run this script again."
+    say ""
+  fi
+}
+
 CONF_CHANGED=0
 
 ensure_nginx_conf() {
@@ -513,6 +555,7 @@ else
 
   say "Checking the nginx site config…"
   ensure_nginx_conf
+  warn_about_main_conf
 
   if rc-service nginx status >/dev/null 2>&1; then
     if [ "$CONF_CHANGED" -eq 1 ]; then

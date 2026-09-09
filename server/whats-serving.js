@@ -5,6 +5,10 @@
  *   node server/whats-serving.js                  check the default port
  *   node server/whats-serving.js 8080 80 3000     check these ports too
  *   node server/whats-serving.js http://vm:8749/  check a full address
+ *   node server/whats-serving.js 80 --host=keys.example.org
+ *                                     ask port 80 as that named site, which is
+ *                                     the only way to see what a name-based
+ *                                     virtual host would really do
  *
  * WHAT THIS IS FOR
  *
@@ -39,7 +43,7 @@ const ROOT = path.resolve(__dirname, '..');
  * One request, no throwing. Everything is a result, including a refusal —
  * "nothing is listening" is an answer to the question being asked.
  * ------------------------------------------------------------------------ */
-function ask(url, timeoutMs) {
+function ask(url, timeoutMs, hostHeader) {
   return new Promise((resolve) => {
     let u;
     try {
@@ -49,9 +53,17 @@ function ask(url, timeoutMs) {
       return;
     }
 
+    /* A Host header that differs from the address dialled is the whole point
+     * of --host: it is how you ask "what would nginx do with a request for
+     * keys.example.org?" while connecting to 127.0.0.1. Without it a
+     * name-based virtual host answers as its default site and the reply tells
+     * you nothing about the site you actually care about. */
+    const headers = hostHeader ? { host: hostHeader } : undefined;
+
     const lib = u.protocol === 'https:' ? https : http;
     const req = lib.request(u, {
       method: 'GET',
+      headers,
       /* A self-signed certificate is a perfectly normal thing to find here and
        * is not what we are diagnosing. */
       rejectUnauthorized: false,
@@ -78,11 +90,11 @@ function ask(url, timeoutMs) {
  * the one route only our server has, in the shape only our server sends?
  * A static host serving a stray file called api/auth/state would give 200 and
  * nonsense; the field check is what makes this positive evidence. */
-async function identify(origin) {
-  const root = await ask(origin + '/');
+async function identify(origin, hostHeader) {
+  const root = await ask(origin + '/', 0, hostHeader);
   if (root.error) return { kind: 'silent', detail: root.error, root };
 
-  const state = await ask(origin + '/api/auth/state');
+  const state = await ask(origin + '/api/auth/state', 0, hostHeader);
   if (!state.error && state.status === 200) {
     let data = null;
     try { data = JSON.parse(state.body); } catch (e) { data = null; }
@@ -152,7 +164,13 @@ async function main() {
   /* Anything that looks like an address is checked as given; bare numbers are
    * ports on this machine. */
   const targets = [];
+  let hostHeader = null;
   for (const a of args) {
+    const h = /^--host=(.+)$/.exec(a);
+    if (h) {
+      hostHeader = h[1];
+      continue;
+    }
     if (/^https?:\/\//i.test(a)) {
       targets.push(a.replace(/\/+$/, ''));
     } else if (/^\d+$/.test(a)) {
@@ -173,6 +191,11 @@ async function main() {
   console.log('');
   console.log('St. Peter’s Keys — what is answering?');
   console.log('files here: ' + ROOT);
+  if (hostHeader) {
+    /* Said out loud: a reply that depends on a header you cannot see in the
+     * address is otherwise baffling to read back later. */
+    console.log('asking as:  Host: ' + hostHeader);
+  }
   if (!fs.existsSync(path.join(ROOT, 'index.html'))) {
     console.log('WARNING: no index.html next to server/ — is this the right folder?');
   }
@@ -182,7 +205,7 @@ async function main() {
   let foundStatic = null;
 
   for (const origin of targets) {
-    const info = await identify(origin);
+    const info = await identify(origin, hostHeader);
     if (info.kind === 'silent') {
       /* Only worth a line when the user asked about it specifically. */
       if (args.length) console.log(origin + '\n  – nothing listening (' + info.detail + ')\n');
