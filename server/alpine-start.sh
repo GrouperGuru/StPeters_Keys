@@ -7,6 +7,8 @@
 #    ./server/alpine-start.sh --skip-nginx    start only the app server
 #    ./server/alpine-start.sh --check-conf    show what the config would be
 #    ./server/alpine-start.sh --force-conf    overwrite a config we did not write
+#    ./server/alpine-start.sh --no-touch-main  only warn about nginx.conf,
+#                                             never edit it
 #    ./server/alpine-start.sh --take-default-server
 #                                             rename any other site holding
 #                                             default_server on port 80
@@ -54,12 +56,14 @@ SKIP_NGINX=0
 FORCE_CONF=0
 CHECK_CONF=0
 TAKE_DEFAULT=0
+TOUCH_MAIN=1
 for arg in "$@"; do
   case "$arg" in
     --skip-nginx|--no-nginx|--keep-nginx) SKIP_NGINX=1 ;;
     --force-conf|--force-nginx-conf)      FORCE_CONF=1 ;;
     --check-conf|--print-conf)            CHECK_CONF=1 ;;
     --take-default-server)                TAKE_DEFAULT=1 ;;
+    --no-touch-main)                      TOUCH_MAIN=0 ;;
     -h|--help)
       sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
@@ -316,6 +320,108 @@ nginx_test() {
 # document root (/var/www/html and friends): a `server {}` block sitting
 # directly in nginx.conf will serve the app as plain files, and nothing in
 # http.d/ can override it.
+# Repair the main config: add the missing include, and comment out any server
+# block in it that serves this checkout directly.
+#
+# This edits a file the script did not write, which is a bigger step than
+# dropping a site into http.d/ — so it takes a backup, validates with nginx -t,
+# and puts the original back if the result will not load. --no-touch-main
+# reduces it to the warnings alone.
+#
+# Both repairs are needed together and neither is sufficient alone: without the
+# include our site file is never read, and without disabling the server block
+# nothing in http.d/ can outrank it.
+fix_main_conf() {
+  [ -r "$NGINX_MAIN_CONF" ] || return 0
+  if [ "$TOUCH_MAIN" -eq 0 ]; then
+    warn_about_main_conf
+    return 0
+  fi
+
+  incdir=$(dirname "$NGINX_CONF")
+  need_include=0
+  grep -qE '^[[:space:]]*include[^;]*'"$(basename "$incdir")"'/' "$NGINX_MAIN_CONF" 2>/dev/null \
+    || need_include=1
+
+  tmp="$NGINX_MAIN_CONF.keys-new.$$"
+
+  # Brace-counted, so a `server { ... }` spanning many lines is matched whole
+  # rather than by guesswork. Anything mentioning this checkout is commented
+  # out; every other server block is copied through untouched.
+  awk -v root="$ROOT" \
+      -v incdir="$incdir" \
+      -v incline="    include $incdir/*.conf;" \
+      -v need_include="$need_include" \
+      -v stamp="$(date +%Y-%m-%d)" '
+    BEGIN { inserver=0; depth=0; buf=""; hasroot=0; added=0 }
+    {
+      if (!inserver && $0 ~ /^[[:space:]]*server[[:space:]]*\{/) {
+        inserver=1; depth=0; buf=""; hasroot=0
+      }
+      if (inserver) {
+        buf = buf $0 "\n"
+        t = $0
+        o = gsub(/\{/, "{", t)
+        c = gsub(/\}/, "}", t)
+        depth += o - c
+        if (root != "" && index($0, root) > 0) hasroot=1
+        if (depth <= 0) {
+          inserver = 0
+          if (hasroot) {
+            printf "# --- disabled by St Peters Keys (server/alpine-start.sh) %s ---\n", stamp
+            printf "# This server block served %s directly. While it was live,\n", root
+            printf "# the reverse-proxy site in %s/ could never be reached,\n", incdir
+            printf "# so the app loaded and then reported that this was not its server.\n"
+            printf "# Delete these comment markers to restore it.\n"
+            n = split(buf, L, "\n")
+            for (i = 1; i < n; i++) printf "#%s\n", L[i]
+            printf "# --- end ---\n"
+          } else {
+            printf "%s", buf
+          }
+        }
+        next
+      }
+      print
+      if (need_include == 1 && added == 0 && $0 ~ /^[[:space:]]*http[[:space:]]*\{/) {
+        print incline
+        added = 1
+      }
+    }
+  ' "$NGINX_MAIN_CONF" > "$tmp" || { rm -f "$tmp"; die "could not rewrite $NGINX_MAIN_CONF"; }
+
+  if cmp -s "$tmp" "$NGINX_MAIN_CONF"; then
+    rm -f "$tmp"
+    return 0
+  fi
+
+  was_ok=0
+  nginx_test && was_ok=1
+
+  mainbak="$NGINX_MAIN_CONF.bak-$(date +%Y%m%d%H%M%S)"
+  cp "$NGINX_MAIN_CONF" "$mainbak" || { rm -f "$tmp"; die "could not back up $NGINX_MAIN_CONF"; }
+  cat "$tmp" > "$NGINX_MAIN_CONF" || { rm -f "$tmp"; die "could not write $NGINX_MAIN_CONF"; }
+  rm -f "$tmp"
+
+  say ""
+  say "  Repaired $NGINX_MAIN_CONF (previous kept as $(basename "$mainbak")):"
+  [ "$need_include" -eq 1 ] && say "    • added  include $incdir/*.conf;"
+  say "    • commented out any server block serving $ROOT"
+
+  if [ "$was_ok" -eq 1 ] && ! nginx_test; then
+    cp "$mainbak" "$NGINX_MAIN_CONF"
+    say ""
+    say "  …but nginx -t rejects the result, so it has been put back:"
+    nginx -t 2>&1 | sed 's/^/      /' || true
+    die "$NGINX_MAIN_CONF was left exactly as it was found. Fix it by hand:
+       add  include $incdir/*.conf;  inside the http { } block, and
+       comment out the server block that serves $ROOT."
+  fi
+
+  CONF_CHANGED=1
+  return 0
+}
+
 warn_about_main_conf() {
   [ -r "$NGINX_MAIN_CONF" ] || return 0
   incdir=$(dirname "$NGINX_CONF")
@@ -555,7 +661,7 @@ else
 
   say "Checking the nginx site config…"
   ensure_nginx_conf
-  warn_about_main_conf
+  fix_main_conf
 
   if rc-service nginx status >/dev/null 2>&1; then
     if [ "$CONF_CHANGED" -eq 1 ]; then
