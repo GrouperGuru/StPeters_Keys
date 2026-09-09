@@ -1,0 +1,317 @@
+/* =============================================================================
+ * print.css — St. Peter's Keys :: PRINT / PDF EXPORT
+ *
+ * Loaded as  <link rel="stylesheet" href="assets/css/print.css" media="print">
+ * (index.html). Because the link already carries media="print", nothing in
+ * this file is wrapped in @media print — the whole sheet IS the print sheet.
+ * If you ever remove that media attribute you must wrap everything below in
+ * `@media print { … }` or the app UI will disappear on screen.
+ *
+ * WHAT THIS FILE IS FOR
+ *   paper.css already describes the paper at true physical size for both
+ *   screen and print. This file only:
+ *     1. declares the mixed-orientation page boxes (named pages),
+ *     2. hides the application chrome,
+ *     3. un-does the on-screen stage: the 3D book model, the zoom transform,
+ *        the scroll container, the per-page visibility juggling,
+ *     4. emits exactly four sheets with no trailing blank page,
+ *     5. neutralises every screen-only affordance (overflow warning, focus
+ *        highlight, paper drop shadow, page-turn shading).
+ *
+ * >>> WHY EVERY STAGE RULE CARRIES !important <<<
+ *   flip.js writes INLINE styles on #page-stage, #stage-sizer and .paper —
+ *   transform, width, height, visibility, z-index, box-shadow, transition,
+ *   position, transform-origin. Inline styles beat any stylesheet rule
+ *   regardless of selector specificity, so an override without !important is
+ *   simply ignored and the printed sheet comes out scaled, blank, or with
+ *   three of the four pages invisible. app.js also strips those inline styles
+ *   in prepareForPrint(), but Ctrl/Cmd+P straight from the browser menu never
+ *   calls it — this file is the guarantee, not the belt-and-braces.
+ *   DO NOT remove the !important flags.
+ *
+ * No @import. No url(). No network requests.
+ *
+ * TABLE OF CONTENTS
+ *   01  Page boxes (@page) + the landscape flip for page 4
+ *   02  Document root reset
+ *   03  Hide the application chrome
+ *   04  Un-stage: #app → #page-stage back to plain block flow
+ *   05  The sheets: .paper positioning, pagination, colour fidelity
+ *   06  Neutralise screen-only affordances
+ *   07  Kill animation/transition state mid-flight
+ * ========================================================================== */
+
+
+/* =============================================================================
+ * 01 — PAGE BOXES
+ * -----------------------------------------------------------------------------
+ * Zero margins: the whole 8.5in × 11in sheet belongs to .paper, and
+ * .paper-flow supplies the printed margins (0.5in on pages 1–3, 0.35in-ish on
+ * page 4). A non-zero @page margin here would double the margins and shrink
+ * the content to a second sheet.
+ *
+ * Named page `landscape` is the ONLY way to mix orientations in one document.
+ * Page 4 opts in via its data-orientation attribute, which render.js writes.
+ * ========================================================================== */
+
+@page {
+  size: letter portrait;
+  margin: 0;
+}
+
+@page landscape {
+  size: letter landscape;
+  margin: 0;
+}
+
+.paper[data-orientation="landscape"] {
+  page: landscape;
+}
+
+
+/* =============================================================================
+ * 02 — DOCUMENT ROOT RESET
+ * -----------------------------------------------------------------------------
+ * app.css pins html/body to the viewport with height:100% + overflow:hidden so
+ * the app never scrolls. In print that would clip everything after sheet one.
+ * ========================================================================== */
+
+html,
+body {
+  width: auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: visible !important;
+  background: #fff !important;
+  color: #000 !important;
+}
+
+/* Widows/orphans belong to the paper, not the chrome. */
+body {
+  orphans: 2;
+  widows: 2;
+}
+
+
+/* =============================================================================
+ * 03 — HIDE THE APPLICATION CHROME
+ * -----------------------------------------------------------------------------
+ * `display:none` is correct HERE (unlike on .paper — see §05): none of these
+ * elements is ever measured by fit.js or flip.js.
+ * ========================================================================== */
+
+#toolbar,
+#editor-pane,
+#editor-scroll,
+#rail-resizer,
+#thumb-rail,
+#toasts,
+#load-input,
+.stage-empty,
+noscript {
+  display: none !important;
+}
+
+
+/* =============================================================================
+ * 04 — UN-STAGE
+ * -----------------------------------------------------------------------------
+ * #app and #workspace are CSS grids on screen; #stage-viewport is a scrolling
+ * flex container; #page-stage is a scaled 3D perspective context. For print
+ * all of them must collapse to transparent, unsized, block-flow wrappers so
+ * the four .paper blocks land in normal flow, one per sheet.
+ * ========================================================================== */
+
+#app,
+#workspace,
+#preview-pane,
+#stage-viewport,
+#stage-sizer,
+#page-stage {
+  display: block !important;
+  position: static !important;
+  float: none !important;
+  width: auto !important;
+  height: auto !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: none !important;
+  max-height: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: visible !important;
+  background: none !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  filter: none !important;
+  /* Grid/flex plumbing from app.css must not survive into print. */
+  grid-template-columns: none !important;
+  grid-template-rows: none !important;
+  grid-column: auto !important;
+  grid-row: auto !important;
+}
+
+/* FLIP ENGINE OVERRIDE — flip.js sets these inline on #page-stage every
+ * relayout: transform:scale(k), transform-origin, width/height in px,
+ * perspective. All of it must go, or the printed sheets come out at the
+ * on-screen zoom factor. !important is mandatory: these are inline styles. */
+#page-stage {
+  transform: none !important;
+  -webkit-transform: none !important;
+  transform-origin: 0 0 !important;
+  transform-style: flat !important;
+  perspective: none !important;
+  -webkit-perspective: none !important;
+  will-change: auto !important;
+}
+
+/* flip.js sets #stage-sizer to pageW*k × pageH*k in px so the on-screen
+ * scrollbars behave; in print it must be a bare wrapper. (Both #stage-sizer
+ * and #stage-viewport are covered above, restated here per the contract in
+ * docs/CLASSES.md so the dependency is impossible to miss.) */
+#stage-sizer,
+#stage-viewport {
+  width: auto !important;
+  height: auto !important;
+  overflow: visible !important;
+  padding: 0 !important;
+}
+
+
+/* =============================================================================
+ * 05 — THE SHEETS
+ * -----------------------------------------------------------------------------
+ * On screen all four .paper elements are absolutely positioned at the same
+ * origin and all but one is hidden with `visibility:hidden` (SPEC §4 forbids
+ * display:none because fit.js must keep measuring the inactive pages). For
+ * print they become four static blocks, all visible, one per physical sheet.
+ * ========================================================================== */
+
+/* FLIP ENGINE OVERRIDE — every property listed here is written INLINE by
+ * flip.js (position/left/top on init, visibility+z-index on every page change,
+ * transform+box-shadow+transition during a turn). Without !important the
+ * printout is a single sheet showing whichever page was on top, and any turn
+ * still in flight prints a page frozen mid-rotation. */
+.paper {
+  position: static !important;
+  left: auto !important;
+  top: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  z-index: auto !important;
+  visibility: visible !important;
+  opacity: 1 !important;
+  transform: none !important;
+  -webkit-transform: none !important;
+  transform-origin: 50% 50% !important;
+  backface-visibility: visible !important;
+  box-shadow: none !important;
+  outline: none !important;
+  filter: none !important;
+  margin: 0 !important;
+  border: 0 !important;
+  background: #fff !important;
+  color: #000 !important;
+
+  /* One .paper per sheet. */
+  break-after: page;
+  page-break-after: always;
+  break-inside: avoid;
+  page-break-inside: avoid;
+
+  /* Keep the trim clip: nothing may bleed onto the next sheet. */
+  overflow: hidden !important;
+
+  /* Ruled boxes, hairlines and the calendar logo must print even when the
+   * browser's "background graphics" option is off. */
+  print-color-adjust: exact !important;
+  -webkit-print-color-adjust: exact !important;
+  color-adjust: exact !important;
+}
+
+/* FLIP ENGINE OVERRIDE — the trim sizes, re-asserted with !important because
+ * the geometry is the whole point of the export and inline width/height would
+ * otherwise win. */
+.paper[data-orientation="portrait"] {
+  width: 8.5in !important;
+  height: 11in !important;
+}
+
+.paper[data-orientation="landscape"] {
+  width: 11in !important;
+  height: 8.5in !important;
+}
+
+/* Exactly 4 sheets — no trailing blank page. `break-after: page` on the last
+ * sheet would emit an empty fifth one. */
+.paper:last-child {
+  break-after: auto;
+  page-break-after: auto;
+}
+
+/* flip.js hides inactive pages with a class as well as inline visibility.
+ * app.js's prepareForPrint() removes it, but a raw Ctrl/Cmd+P does not. */
+.paper.is-hidden {
+  visibility: visible !important;
+  pointer-events: auto !important;
+}
+
+/* .paper-flow keeps its inch padding from paper.css — that IS the printed
+ * margin. Only the scroll-container behaviour is re-asserted. */
+.paper-flow {
+  overflow: hidden !important;
+}
+
+
+/* =============================================================================
+ * 06 — NEUTRALISE SCREEN-ONLY AFFORDANCES
+ * -----------------------------------------------------------------------------
+ * Each of these has a counterpart in paper.css §06 (plus .slip--unknown in
+ * §04). Add a rule here whenever you add a screen affordance there.
+ * ========================================================================== */
+
+/* The page-turn shading overlay — flip.js drives its opacity inline. */
+.paper-shade {
+  display: none !important;
+}
+
+/* fit.js's "still does not fit at minimum size" author warning. */
+.is-overflowing {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+/* Focus highlight for the region bound to the editor field being typed into. */
+.rt-out.is-target {
+  background: none !important;
+  background-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* A slip with an unrecognised type shows a dashed red frame on screen; it must
+ * print as plain content, not as an error box. */
+.slip--unknown {
+  outline: none !important;
+}
+
+
+/* =============================================================================
+ * 07 — KILL ANIMATION STATE
+ * -----------------------------------------------------------------------------
+ * A print triggered mid page-turn must not capture a transitioning transform
+ * or a half-faded shade. Transitions are also disabled so nothing re-animates
+ * while the print snapshot is being taken.
+ * ========================================================================== */
+
+#page-stage,
+#page-stage *,
+.paper,
+.paper * {
+  transition: none !important;
+  animation: none !important;
+}
